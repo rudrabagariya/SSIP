@@ -91,6 +91,10 @@ def main():
                         help="Grams near zero to snap to 0.0g (default: 2.0g)")
     parser.add_argument("--stability-variance", type=float, default=1.5,
                         help="Max gram difference in 1 sec to declare STABLE (default: 1.5g)")
+    parser.add_argument("--no-tare", action="store_true",
+                        help="Skip automatic zero tare at startup")
+    parser.add_argument("--tare-samples", type=int, default=15,
+                        help="Number of samples to average for tare (default: 15)")
     parser.add_argument("--raw", action="store_true",
                         help="Also display raw ADC values")
     parser.add_argument("--no-cal", action="store_true",
@@ -112,13 +116,19 @@ def main():
     if not args.no_cal:
         if os.path.exists(args.cal):
             hx.load_calibration(args.cal)
+            print(f"✅ Calibration loaded from '{args.cal}'")
         else:
             print(f"⚠️  Calibration file '{args.cal}' not found!")
             print("   Run 'sudo python3 calibrate.py' first.")
             print("   Continuing with uncalibrated raw values...\n")
             args.no_cal = True
 
-    print()
+    # Automatic zero tare at startup
+    if not args.no_cal and not args.no_tare:
+        print("⚖️  Auto-taring scale (please leave platform empty)...")
+        hx.tare(times=args.tare_samples)
+        print("✅ Zero tare complete — scale is at 0.0g!\n")
+
     print(f"  Stability window: ±{args.stability_variance}g | Zero deadband: ±{args.deadband}g")
     print("  Press Ctrl+C to stop")
     print("-" * 60)
@@ -134,10 +144,8 @@ def main():
     reading_count = 0
 
     try:
-        # Pre-seed filters with initial tare
-        initial_raw = hx.get_value(times=3) if not args.no_cal else 0
-        initial_weight = initial_raw / hx.REFERENCE_UNIT if (not args.no_cal and hx.REFERENCE_UNIT) else 0.0
-        kalman_filter.set_initial(initial_weight)
+        # Pre-seed filters with initial zeroed state
+        kalman_filter.set_initial(0.0)
 
         while True:
             reading_count += 1

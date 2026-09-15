@@ -39,22 +39,21 @@ def init_db():
             key TEXT UNIQUE, value TEXT
         )""")
     
-    # Load products from CSV if table is empty
-    if cur.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
-        print("Products table is empty. Loading from CSV...")
-        products_from_csv = load_products_from_csv()
-        
-        if products_from_csv:
-            product_list_for_db = [
-                (barcode, info['name'], info['price'], info['gst_percent'], 
-                 info['hsn_code'], info.get('weight_grams', 0), info.get('quantity', 0))
-                for barcode, info in products_from_csv.items()
-            ]
-            cur.executemany(
-                "INSERT INTO products (barcode, name, price, gst_percent, hsn_code, weight_grams, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                product_list_for_db
-            )
-            print(f"✅ Successfully inserted {len(product_list_for_db)} products into the database.")
+    # Always reload and sync products table from products.csv on startup
+    csv_file = os.path.join(os.path.dirname(__file__), "products.csv")
+    products_from_csv = load_products_from_csv(csv_file)
+    if products_from_csv:
+        cur.execute("DELETE FROM products")
+        product_list_for_db = [
+            (barcode, info['name'], info['price'], info['gst_percent'], 
+             info['hsn_code'], info.get('weight_grams', 0), info.get('quantity', 0))
+            for barcode, info in products_from_csv.items()
+        ]
+        cur.executemany(
+            "INSERT INTO products (barcode, name, price, gst_percent, hsn_code, weight_grams, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+            product_list_for_db
+        )
+        print(f"✅ Synced {len(product_list_for_db)} products from '{csv_file}' into SQLite database.")
     
     # Initialize settings if empty
     if cur.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
@@ -73,8 +72,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-def load_products_from_csv(filename="products.csv"):
+def load_products_from_csv(filename=None):
     """Load products from CSV file"""
+    if filename is None:
+        filename = os.path.join(os.path.dirname(__file__), "products.csv")
     products = {}
     try:
         with open(filename, newline='', encoding='utf-8') as csvfile:
@@ -98,8 +99,10 @@ def load_products_from_csv(filename="products.csv"):
 # load_products_from_csv_with_quantity was identical to load_products_from_csv — removed.
 # Use load_products_from_csv() everywhere instead.
 
-def save_products_to_csv(products, filename="products.csv"):
+def save_products_to_csv(products, filename=None):
     """Save products with inventory data to CSV file"""
+    if filename is None:
+        filename = os.path.join(os.path.dirname(__file__), "products.csv")
     try:
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             fieldnames = ['barcode', 'name', 'price', 'gst_percent', 'hsn_code', 'weight_grams', 'quantity']

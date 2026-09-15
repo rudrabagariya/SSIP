@@ -319,13 +319,9 @@ class SmartKiosk(QMainWindow):
     def on_scale_weight_updated(self, live_weight, is_stable):
         """Update live trolley weight indicator on the cart screen."""
         if hasattr(self, 'cart_weight_label') and self.cart_weight_label:
-            expected_total = sum(item.get('weight_grams', 0.0) * item.get('qty', 1) for item in self.cart)
             dot = "🟢" if is_stable else "🟡"
             disp_weight = max(0.0, live_weight)
-            if expected_total > 0:
-                self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}  (Exp: {expected_total:.1f}g)")
-            else:
-                self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}")
+            self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}")
 
     def on_trolley_weight_settled(self, delta, total_weight):
         """
@@ -2377,11 +2373,7 @@ class SmartKiosk(QMainWindow):
         # Update live trolley weight indicator
         if hasattr(self, 'cart_weight_label') and getattr(self, 'scale_worker', None) and self.cart_weight_label:
             live_w = max(0.0, self.scale_worker.get_current_weight())
-            expected_total = sum(item.get("weight_grams", 0.0) * item.get("qty", 1) for item in self.cart)
-            if expected_total > 0:
-                self.cart_weight_label.setText(f"🛒 Trolley: {live_w:.1f}g  (Exp: {expected_total:.1f}g)")
-            else:
-                self.cart_weight_label.setText(f"🛒 Trolley: {live_w:.1f}g")
+            self.cart_weight_label.setText(f"🛒 Trolley: {live_w:.1f}g  🟢")
 
     def create_quantity_widget(self, row, qty):
         # Outer wrapper to center content vertically

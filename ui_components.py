@@ -328,9 +328,9 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         p_name.setWordWrap(True)
         pb_layout.addWidget(p_name)
 
-        target_info = QLabel(f"Expected: {self.expected_weight:.1f} g  (Allowed: {self.min_weight:.0f}g – {self.max_weight:.0f}g)")
+        target_info = QLabel("Please place the item into the trolley to verify")
         target_info.setAlignment(Qt.AlignCenter)
-        target_info.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 600; margin-top: 4px;")
+        target_info.setStyleSheet("font-size: 14px; color: #64748b; font-weight: 500; margin-top: 4px;")
         pb_layout.addWidget(target_info)
         self.content_layout.addWidget(prod_box)
 
@@ -425,10 +425,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #ca8a04;")
         else:
             if is_stable:
-                if diff < self.min_weight:
-                    self.live_status_label.setText(f"⚠️ Underweight (+{diff:.1f}g vs {self.expected_weight:.0f}g)")
-                else:
-                    self.live_status_label.setText(f"⚠️ Overweight (+{diff:.1f}g vs {self.expected_weight:.0f}g)")
+                self.live_status_label.setText("⚠️ Weight mismatch detected. Please place the correct item.")
                 self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")

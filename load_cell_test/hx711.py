@@ -443,6 +443,54 @@ class HX711:
     def offset(self, val):
         self.set_offset(val)
 
+    def calibrate(self, known_weight, times=15):
+        """Calculate and set the scale factor based on a known weight."""
+        val = self.get_value(times)
+        if val == 0:
+            val = 1
+        scale = val / known_weight
+        self.set_reference_unit(scale)
+        return scale
+
+    def save_calibration(self, filename="calibration.json"):
+        """Save offset and scale to a JSON file."""
+        import json
+        data = {
+            "offset": self.OFFSET,
+            "scale": self.REFERENCE_UNIT
+        }
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error saving calibration: {e}")
+
+    def load_calibration(self, filename="calibration.json"):
+        """Load offset and scale from a JSON file."""
+        import json
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            if "offset" in data:
+                self.set_offset(data["offset"])
+            if "scale" in data:
+                self.set_reference_unit(data["scale"])
+            return True
+        except FileNotFoundError:
+            # File doesn't exist, which is fine for the first time
+            return False
+        except Exception as e:
+            print(f"Error loading calibration: {e}")
+            return False
+
+    def cleanup(self):
+        """Power down HX711 and clean up GPIO."""
+        try:
+            self.power_down()
+        except:
+            pass
+        GPIO.cleanup()
+
 def hx711_add_event_detect(hx711_instance, event_callback):
         GPIO.add_event_detect(self.DOUT, GPIO.FALLING, 
             callback=event_callback)

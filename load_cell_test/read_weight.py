@@ -35,6 +35,10 @@ def main():
                         help="Seconds between readings (default: 0.3)")
     parser.add_argument("--samples", type=int, default=5,
                         help="Samples per reading for median filter (default: 5)")
+    parser.add_argument("--smooth", type=float, default=0.25,
+                        help="EMA smoothing factor 0.05-1.0 (default: 0.25, lower = smoother)")
+    parser.add_argument("--deadband", type=float, default=3.0,
+                        help="Grams near zero to suppress to 0.0g (default: 3.0)")
     parser.add_argument("--raw", action="store_true",
                         help="Also display raw ADC values")
     parser.add_argument("--no-cal", action="store_true",
@@ -42,7 +46,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  HX711 Continuous Weight Reader")
+    print("  HX711 Continuous Weight Reader (with Adaptive Smoothing)")
     print("=" * 60)
 
     try:
@@ -62,44 +66,58 @@ def main():
             args.no_cal = True
 
     print()
+    print(f"  Smoothing: {args.smooth} | Deadband: ±{args.deadband}g | Samples: {args.samples}")
     print("  Press Ctrl+C to stop")
     print("-" * 60)
     print()
 
     try:
         reading_num = 0
+        smoothed_weight = None
         stable_weight = 0
         stable_count = 0
         STABLE_THRESHOLD = 2.0  # grams — readings within this range are "stable"
+        STEP_THRESHOLD = 15.0   # grams — sudden delta resets smoothing instantly
 
         while True:
             reading_num += 1
 
-            raw = hx.read_raw(times=args.samples)
-            weight = hx.read_weight(times=args.samples) if not args.no_cal else 0
+            # Read instant calibrated weight
+            weight_instant = hx.read_weight(times=args.samples) if not args.no_cal else 0
+            raw = hx.read_raw(times=1) if (args.no_cal or args.raw) else 0
+
+            # Adaptive Exponential Moving Average (EMA)
+            if smoothed_weight is None:
+                smoothed_weight = weight_instant
+            else:
+                # If user placed or removed an item suddenly, snap immediately
+                if abs(weight_instant - smoothed_weight) > STEP_THRESHOLD:
+                    smoothed_weight = weight_instant
+                else:
+                    smoothed_weight = (args.smooth * weight_instant) + ((1.0 - args.smooth) * smoothed_weight)
+
+            # Auto-zero deadband near 0
+            if abs(smoothed_weight) < args.deadband:
+                display_weight = 0.0
+            else:
+                display_weight = smoothed_weight
 
             # Stability detection
-            if abs(weight - stable_weight) < STABLE_THRESHOLD:
+            if abs(display_weight - stable_weight) < STABLE_THRESHOLD:
                 stable_count += 1
             else:
-                stable_weight = weight
+                stable_weight = display_weight
                 stable_count = 0
 
             stability = "📌 STABLE" if stable_count >= 3 else "⏳ settling..."
 
             if args.no_cal or args.raw:
-                print(f"  #{reading_num:4d}  |  Raw: {raw:10d}  |  Weight: {weight:8.1f} g  |  {stability}")
+                print(f"  #{reading_num:4d}  |  Raw: {raw:10d}  |  Instant: {weight_instant:7.1f}g  |  Smooth: {display_weight:7.1f}g  |  {stability}")
             else:
-                # Clean display
-                if weight < 0 and abs(weight) < 5:
-                    display_weight = 0.0  # Suppress noise near zero
-                else:
-                    display_weight = weight
-
                 if display_weight >= 1000:
-                    print(f"  #{reading_num:4d}  |  {display_weight/1000:6.3f} kg  |  {display_weight:8.1f} g  |  {stability}")
+                    print(f"  #{reading_num:4d}  |  {display_weight/1000:6.3f} kg  ({display_weight:7.1f} g)  |  {stability}")
                 else:
-                    print(f"  #{reading_num:4d}  |  {display_weight:8.1f} g   |  {stability}")
+                    print(f"  #{reading_num:4d}  |  {display_weight:7.1f} g  |  {stability}")
 
             time.sleep(args.interval)
 

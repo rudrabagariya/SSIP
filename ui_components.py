@@ -371,22 +371,6 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(self.cancel_btn)
 
-        self.skip_btn = QPushButton("Skip / Admin")
-        self.skip_btn.setMinimumHeight(46)
-        self.skip_btn.setCursor(Qt.PointingHandCursor)
-        self.skip_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f8fafc;
-                color: #0284c7;
-                border: 1px solid #bae6fd;
-                border-radius: 8px;
-                font-size: 15px;
-                font-weight: 600;
-            }
-            QPushButton:hover { background-color: #f0f9ff; }
-        """)
-        self.skip_btn.clicked.connect(self.on_skip)
-        btn_layout.addWidget(self.skip_btn)
         self.content_layout.addLayout(btn_layout)
 
         # Connect live scale signal
@@ -438,6 +422,115 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         # Allow staff or customer override
         self.measured_weight = self.expected_weight
         self.accept()
+
+
+class ItemRemovalVerificationOverlay(OverlayDialog):
+    """
+    Active item-by-item removal verification dialog.
+    Triggered when an item is removed from the cart via UI.
+    Waits for the user to physically remove the item from the trolley,
+    tracks the weight drop, and validates against expected weight.
+    """
+    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0):
+        super().__init__(parent)
+        self.scale_worker = scale_worker
+        self.product_name = product_name
+        self.expected_weight = float(expected_weight)
+        self.tolerance_pct = tolerance_pct
+        self.tolerance_g = tolerance_g
+
+        # Compute acceptable bounds for weight DROP
+        tol = max(self.tolerance_g, self.expected_weight * (self.tolerance_pct / 100.0))
+        self.min_drop = max(1.0, self.expected_weight - tol)
+        self.max_drop = self.expected_weight + tol
+
+        self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
+        self.verified = False
+        self.content_container.setFixedWidth(540)
+
+        # Title
+        title_label = QLabel("📤 Remove Item from Trolley")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b; margin-bottom: 4px;")
+        self.content_layout.addWidget(title_label)
+
+        # Product Name Box
+        prod_box = QFrame()
+        prod_box.setStyleSheet("background-color: #fef2f2; border-radius: 12px; padding: 12px;")
+        pb_layout = QVBoxLayout(prod_box)
+        pb_layout.setContentsMargins(12, 10, 12, 10)
+        
+        p_name = QLabel(self.product_name)
+        p_name.setAlignment(Qt.AlignCenter)
+        p_name.setStyleSheet("font-size: 18px; font-weight: 700; color: #991b1b;")
+        p_name.setWordWrap(True)
+        pb_layout.addWidget(p_name)
+
+        target_info = QLabel("Please remove the item from the trolley to continue")
+        target_info.setAlignment(Qt.AlignCenter)
+        target_info.setStyleSheet("font-size: 14px; color: #b91c1c; font-weight: 500; margin-top: 4px;")
+        pb_layout.addWidget(target_info)
+        self.content_layout.addWidget(prod_box)
+
+        # Live Reading Box
+        self.reading_box = QFrame()
+        self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 12px;")
+        rb_layout = QVBoxLayout(self.reading_box)
+        
+        self.live_diff_label = QLabel("Waiting for removal...")
+        self.live_diff_label.setAlignment(Qt.AlignCenter)
+        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
+        rb_layout.addWidget(self.live_diff_label)
+
+        self.live_status_label = QLabel("Take the item out of the trolley")
+        self.live_status_label.setAlignment(Qt.AlignCenter)
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
+        rb_layout.addWidget(self.live_status_label)
+        self.content_layout.addWidget(self.reading_box)
+
+        # Connect live scale signal
+        if self.scale_worker:
+            self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
+
+    def on_weight_update(self, current_weight, is_stable):
+        if self.verified:
+            return
+
+        # If user added an item instead of removing, adjust baseline
+        if current_weight > (self.initial_weight + 5.0):
+            self.initial_weight = current_weight
+
+        diff = self.initial_weight - current_weight
+
+        if diff <= 2.0:
+            self.live_diff_label.setText("Waiting for removal...")
+            self.live_status_label.setText("Take the item out of the trolley")
+            self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
+            return
+
+        # An item has been removed
+        self.live_diff_label.setText(f"-{diff:.1f} g")
+
+        if self.min_drop <= diff <= self.max_drop:
+            if is_stable:
+                self.verified = True
+                self.live_diff_label.setText(f"✅ Verified: -{diff:.1f} g")
+                self.live_status_label.setText("Removal verified! Updating cart...")
+                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+                QTimer.singleShot(800, self.accept)
+            else:
+                self.live_status_label.setText("Stabilizing reading...")
+                self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #854d0e;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #ca8a04;")
+        else:
+            if is_stable:
+                self.live_status_label.setText("⚠️ Weight mismatch detected. Please remove the correct item.")
+                self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
 
 class ItemRemovedOverlay(OverlayDialog):
@@ -714,3 +807,184 @@ class UnscannedItemOverlay(OverlayDialog):
         super().reject()
 
 
+class PaymentWeightWarningOverlay(OverlayDialog):
+    """
+    Warning popup shown when weight drops significantly during payment.
+    Blocks the UI until the items are placed back into the trolley.
+    """
+    def __init__(self, parent, scale_worker, expected_total_weight):
+        super().__init__(parent)
+        self.scale_worker = scale_worker
+        self.expected_total_weight = float(expected_total_weight)
+        
+        self.content_container.setFixedWidth(540)
+
+        # Top Warning Icon
+        self.icon_label = QLabel("🚨")
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setStyleSheet("font-size: 50px; margin-bottom: 2px;")
+        self.content_layout.addWidget(self.icon_label)
+
+        # Title
+        self.title_label = QLabel("Cart Modified During Payment")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 23px; font-weight: 800; color: #dc2626;")
+        self.content_layout.addWidget(self.title_label)
+
+        # Warning Card Box
+        self.warning_box = QFrame()
+        self.warning_box.setStyleSheet("""
+            QFrame {
+                background-color: #fef2f2;
+                border: 2px solid #f87171;
+                border-radius: 14px;
+                padding: 12px;
+            }
+        """)
+        wb_layout = QVBoxLayout(self.warning_box)
+        wb_layout.setContentsMargins(16, 12, 16, 12)
+        wb_layout.setSpacing(6)
+
+        self.msg_label = QLabel("Weight changed unexpectedly! You cannot add or remove items during checkout.")
+        self.msg_label.setAlignment(Qt.AlignCenter)
+        self.msg_label.setWordWrap(True)
+        self.msg_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #991b1b;")
+        wb_layout.addWidget(self.msg_label)
+
+        self.action_instruction = QLabel("⚠️ Please restore the trolley to its exact original state to continue payment.")
+        self.action_instruction.setAlignment(Qt.AlignCenter)
+        self.action_instruction.setWordWrap(True)
+        self.action_instruction.setStyleSheet("font-size: 14px; font-weight: 700; color: #b91c1c;")
+        wb_layout.addWidget(self.action_instruction)
+        
+        self.content_layout.addWidget(self.warning_box)
+
+        # Live Reading / Status Box
+        self.status_box = QFrame()
+        self.status_box.setStyleSheet("""
+            QFrame {
+                background-color: #f8fafc;
+                border: 1px solid #cbd5e1;
+                border-radius: 12px;
+                padding: 10px;
+            }
+        """)
+        sb_layout = QVBoxLayout(self.status_box)
+        sb_layout.setContentsMargins(12, 10, 12, 10)
+        
+        self.live_reading_label = QLabel("Current Weight: -- g")
+        self.live_reading_label.setAlignment(Qt.AlignCenter)
+        self.live_reading_label.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+        sb_layout.addWidget(self.live_reading_label)
+
+        self.stability_label = QLabel("Status: Waiting for items...")
+        self.stability_label.setAlignment(Qt.AlignCenter)
+        self.stability_label.setStyleSheet("font-size: 14px; color: #64748b; font-weight: 600; margin-top: 4px;")
+        sb_layout.addWidget(self.stability_label)
+        
+        self.content_layout.addWidget(self.status_box)
+
+        if self.scale_worker:
+            self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
+
+    def on_weight_update(self, current_weight, is_stable):
+        diff = self.expected_total_weight - current_weight
+        self.live_reading_label.setText(f"Current Weight: {current_weight:.1f} g")
+
+        # If weight is back to expected (within 10g or 2% tolerance)
+        tolerance = max(10.0, self.expected_total_weight * 0.02)
+        
+        if abs(diff) <= tolerance:
+            if is_stable:
+                self.stability_label.setText("Status: 🟢 Verified. Resuming payment...")
+                self.status_box.setStyleSheet("background-color: #f0fdf4; border: 1px solid #4ade80;")
+                self.live_reading_label.setStyleSheet("font-size: 18px; font-weight: 800; color: #16a34a;")
+                QTimer.singleShot(1000, self.accept)
+            else:
+                self.stability_label.setText("Status: 🟡 Stabilizing...")
+        else:
+            if diff > 0:
+                self.stability_label.setText(f"Missing roughly {diff:.1f} g")
+            else:
+                self.stability_label.setText(f"Extra roughly {abs(diff):.1f} g")
+            self.status_box.setStyleSheet("background-color: #f8fafc; border: 1px solid #cbd5e1;")
+            self.live_reading_label.setStyleSheet("font-size: 18px; font-weight: 800; color: #0f172a;")
+
+
+class ClearTrolleyVerificationOverlay(OverlayDialog):
+    """
+    Overlay shown after checkout requiring the user to physically clear the trolley.
+    Automatically closes when the weight hits near 0 (<= 3g).
+    """
+    def __init__(self, parent, scale_worker):
+        super().__init__(parent)
+        self.scale_worker = scale_worker
+        
+        self.content_container.setFixedWidth(540)
+
+        # Icon
+        self.icon_label = QLabel("🛒")
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setStyleSheet("font-size: 50px; margin-bottom: 2px;")
+        self.content_layout.addWidget(self.icon_label)
+
+        # Title
+        self.title_label = QLabel("Please Clear the Trolley")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 24px; font-weight: 800; color: #2563eb;")
+        self.content_layout.addWidget(self.title_label)
+
+        self.instruction_label = QLabel("Remove all items from the trolley to complete your session.")
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.instruction_label.setWordWrap(True)
+        self.instruction_label.setStyleSheet("font-size: 16px; color: #475569; margin: 10px 0;")
+        self.content_layout.addWidget(self.instruction_label)
+
+        # Live Reading / Status Box
+        self.status_box = QFrame()
+        self.status_box.setStyleSheet("""
+            QFrame {
+                background-color: #f8fafc;
+                border: 2px solid #cbd5e1;
+                border-radius: 12px;
+                padding: 14px;
+            }
+        """)
+        sb_layout = QVBoxLayout(self.status_box)
+        sb_layout.setContentsMargins(12, 10, 12, 10)
+        
+        self.live_reading_label = QLabel("Current Weight: -- g")
+        self.live_reading_label.setAlignment(Qt.AlignCenter)
+        self.live_reading_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")
+        sb_layout.addWidget(self.live_reading_label)
+
+        self.stability_label = QLabel("Waiting for trolley to be emptied...")
+        self.stability_label.setAlignment(Qt.AlignCenter)
+        self.stability_label.setStyleSheet("font-size: 14px; color: #64748b; font-weight: 600; margin-top: 4px;")
+        sb_layout.addWidget(self.stability_label)
+        
+        self.content_layout.addWidget(self.status_box)
+
+        if self.scale_worker:
+            self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
+            # Force an immediate check if weight is already 0
+            current_w = getattr(self.scale_worker, 'current_weight', 999.0)
+            if current_w <= 3.0:
+                self.on_weight_update(current_w, True)
+
+    def on_weight_update(self, current_weight, is_stable):
+        self.live_reading_label.setText(f"Current Weight: {current_weight:.1f} g")
+
+        # If weight is basically zero (<= 3g)
+        if current_weight <= 3.0:
+            if is_stable:
+                self.stability_label.setText("🟢 Trolley clear! Thank you.")
+                self.status_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80;")
+                self.live_reading_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #16a34a;")
+                QTimer.singleShot(1000, self.accept)
+            else:
+                self.stability_label.setText("🟡 Stabilizing near zero...")
+        else:
+            self.stability_label.setText("Waiting for trolley to be emptied...")
+            self.status_box.setStyleSheet("background-color: #f8fafc; border: 2px solid #cbd5e1;")
+            self.live_reading_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a;")

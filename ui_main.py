@@ -334,8 +334,28 @@ class SmartKiosk(QMainWindow):
         If weight increases significantly without active scan verification, warn customer
         to scan the barcode first.
         """
+        if getattr(self, 'payment_in_progress', False):
+            if abs(delta) >= 10.0:
+                expected_w = 0.0
+                for item in self.cart:
+                    # Calculate expected total weight based on actual measured weights or fall back to standard weight
+                    item_w = sum(item.get("actual_weights", [])) if item.get("actual_weights") else (item["qty"] * item.get("weight_grams", 0))
+                    expected_w += item_w
+                dlg = PaymentWeightWarningOverlay(self, self.scale_worker, expected_w)
+                self.payment_error_mutex.lock()
+                try:
+                    self.payment_error_triggered = True
+                finally:
+                    self.payment_error_mutex.unlock()
+                dlg.exec_()
+                self.payment_error_mutex.lock()
+                try:
+                    self.payment_error_triggered = False
+                finally:
+                    self.payment_error_mutex.unlock()
+            return
+
         if (getattr(self, 'verification_in_progress', False) or 
-            getattr(self, 'payment_in_progress', False) or 
             getattr(self, '_unscanned_overlay_active', False) or 
             getattr(self, '_item_removed_overlay_active', False)):
             return
@@ -685,13 +705,7 @@ class SmartKiosk(QMainWindow):
 
         # Cart actions
         cart_actions = QHBoxLayout()
-        self.clear_btn = QPushButton("🗑 Clear Cart")
-        self.clear_btn.setObjectName("clearBtn")
-        self.clear_btn.clicked.connect(self.clear_cart)
-        self.clear_btn.setMinimumHeight(self.dp(44))
-        self.clear_btn.setCursor(Qt.PointingHandCursor)
-        cart_actions.addWidget(self.clear_btn)
-
+        # Clear btn was moved to admin panel
         self.zero_scale_btn = QPushButton("🛒 Zero Trolley")
         self.zero_scale_btn.setObjectName("zeroScaleBtn")
         self.zero_scale_btn.clicked.connect(self.start_startup_tare)
@@ -872,6 +886,16 @@ class SmartKiosk(QMainWindow):
         title.setObjectName("storeLabel")
         header.addWidget(title)
         header.addStretch()
+        
+        self.clear_btn = QPushButton("🗑 Clear Cart")
+        self.clear_btn.setStyleSheet("""
+            QPushButton { background: #f59e0b; color: white; border: none; 
+                          border-radius: 8px; padding: 8px 16px; font-weight: 600; }
+            QPushButton:hover { background: #d97706; }
+        """)
+        self.clear_btn.clicked.connect(self.clear_cart)
+        header.addWidget(self.clear_btn)
+
         # Exit app button
         self.admin_exit_btn = QPushButton("⏻ Exit App")
         self.admin_exit_btn.setStyleSheet("""
@@ -2319,14 +2343,17 @@ class SmartKiosk(QMainWindow):
         if code is None:
             code = self.hidden_input.text().strip()
             self.hidden_input.clear()
-          # self.hidden_input.clearFocus()
         
         if code:
             self.hidden_input.clearFocus()
             self.add_barcode_to_cart(code)
-            
+
     # MODIFIED: Logic to fetch and store GST/HSN info in the cart
     def add_barcode_to_cart(self, barcode, qty=1):
+        if getattr(self, 'payment_in_progress', False):
+            self.show_message("Action Blocked", "You cannot modify the cart during checkout.", "warning")
+            return
+            
         # Fetch all required product details from the database
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
@@ -2472,6 +2499,10 @@ class SmartKiosk(QMainWindow):
         return wrapper
 
     def change_quantity(self, row, delta):
+        if getattr(self, 'payment_in_progress', False):
+            self.show_message("Action Blocked", "You cannot modify the cart during checkout.", "warning")
+            return
+            
         if 0 <= row < len(self.cart):
             item = self.cart[row]
             if delta > 0 and self.scale_worker and item.get("weight_grams", 0) > 0:
@@ -2492,17 +2523,61 @@ class SmartKiosk(QMainWindow):
                 finally:
                     self.verification_in_progress = False
             elif delta < 0:
-                if item.get("actual_weights"):
-                    item["actual_weights"].pop()
+                if self.scale_worker and item.get("weight_grams", 0) > 0:
+                    self.verification_in_progress = True
+                    try:
+                        dlg = ItemRemovalVerificationOverlay(
+                            self,
+                            self.scale_worker,
+                            item["name"],
+                            item["weight_grams"],
+                            tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                            tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                        )
+                        if dlg.exec_() != QDialog.Accepted:
+                            return
+                        if item.get("actual_weights"):
+                            item["actual_weights"].pop()
+                    finally:
+                        self.verification_in_progress = False
+                else:
+                    if item.get("actual_weights"):
+                        item["actual_weights"].pop()
 
             item["qty"] += delta
             if item["qty"] <= 0:
-                self.remove_item(row)
+                del self.cart[row]
+                self.refresh_cart_display()
             else:
                 self.refresh_cart_display()
 
     def remove_item(self, row):
+        if getattr(self, 'payment_in_progress', False):
+            self.show_message("Action Blocked", "You cannot modify the cart during checkout.", "warning")
+            return
+            
         if 0 <= row < len(self.cart):
+            item = self.cart[row]
+            if self.scale_worker and item.get("weight_grams", 0) > 0:
+                self.verification_in_progress = True
+                try:
+                    total_expected = sum(item.get("actual_weights", [])) if item.get("actual_weights") else (item["qty"] * item["weight_grams"])
+                    if total_expected <= 0:
+                        total_expected = item["qty"] * item["weight_grams"]
+                    
+                    dlg = ItemRemovalVerificationOverlay(
+                        self,
+                        self.scale_worker,
+                        f"All {item['qty']}x {item['name']}",
+                        total_expected,
+                        tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                        tolerance_g=max(SCALE_WEIGHT_TOLERANCE_GRAMS, SCALE_WEIGHT_TOLERANCE_GRAMS * item["qty"])
+                    )
+                    if dlg.exec_() != QDialog.Accepted:
+                        return
+                finally:
+                    self.verification_in_progress = False
+                    
             del self.cart[row]
             self.refresh_cart_display()
 
@@ -3346,12 +3421,24 @@ class SmartKiosk(QMainWindow):
             receipt_text.setHtml(receipt_html)
             layout.addWidget(receipt_text)
 
+            # Track if user chose a receipt option
+            self.receipt_option_selected = False
+            
+            # Helper to enable finish button
+            def mark_receipt_selected():
+                self.receipt_option_selected = True
+                close_btn.setStyleSheet("""
+                    QPushButton { background-color: #3b82f6; color: white; font-weight: bold; border-radius: 8px; }
+                    QPushButton:hover { background-color: #2563eb; }
+                """)
+
             button_layout = QHBoxLayout()
             print_btn = QPushButton(self.t("Print"))
             
             # Connect print button with tracking to prevent duplicates
             def handle_print():
-                if not self.receipt_printed:
+                mark_receipt_selected()
+                if not getattr(self, 'receipt_printed', False):
                     self.print_thermal_receipt(payment, receipt_html)
                     self.receipt_printed = True
                     print_btn.setEnabled(False)
@@ -3361,15 +3448,39 @@ class SmartKiosk(QMainWindow):
             button_layout.addWidget(print_btn)
 
             email_btn = QPushButton(self.t("Email"))
-            email_btn.clicked.connect(lambda: self.prompt_and_email_receipt(receipt_html))
+            def handle_email():
+                mark_receipt_selected()
+                self.prompt_and_email_receipt(receipt_html)
+            email_btn.clicked.connect(handle_email)
             button_layout.addWidget(email_btn)
 
             telegram_btn = QPushButton(self.t("Telegram"))
-            telegram_btn.clicked.connect(lambda: self.prompt_and_telegram_receipt(payment))
+            def handle_telegram():
+                mark_receipt_selected()
+                self.prompt_and_telegram_receipt(payment)
+            telegram_btn.clicked.connect(handle_telegram)
             button_layout.addWidget(telegram_btn)
 
-            close_btn = QPushButton(self.t("Close"))
-            close_btn.clicked.connect(dlg.accept)
+            close_btn = QPushButton(self.t("Finish & Clear Trolley"))
+            close_btn.setStyleSheet("""
+                QPushButton { background-color: #94a3b8; color: white; border-radius: 8px; }
+                QPushButton:hover { background-color: #64748b; }
+            """)
+            
+            def handle_finish():
+                if not getattr(self, 'receipt_option_selected', False):
+                    self.show_message(self.t("Action Required"), self.t("Please send or print a receipt first, or select a receipt option to continue."), "warning")
+                    return
+                    
+                # Ask user to clear trolley
+                if getattr(self, 'scale_worker', None):
+                    clear_dlg = ClearTrolleyVerificationOverlay(self, self.scale_worker)
+                    if clear_dlg.exec_() == QDialog.Accepted:
+                        dlg.accept()
+                else:
+                    dlg.accept()
+
+            close_btn.clicked.connect(handle_finish)
             button_layout.addWidget(close_btn)
 
             layout.addLayout(button_layout)

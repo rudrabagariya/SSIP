@@ -122,17 +122,20 @@ def main():
             stability = "📌 STABLE" if stable_count >= 3 else "⏳ settling..."
 
             if args.no_cal or args.raw:
-                print(f"  #{reading_num:4d}  |  Raw: {raw:10d}  |  Instant: {weight_instant:7.1f}g  |  Smooth: {display_weight:7.1f}g  |  {stability}")
+                sys.stdout.write(f"\r  #{reading_num:4d} | Raw: {raw:10d} | Inst: {weight_instant:6.1f}g | Smooth: {display_weight:6.1f}g | {stability}    ")
             else:
                 if display_weight >= 1000:
-                    print(f"  #{reading_num:4d}  |  {display_weight/1000:6.3f} kg  ({display_weight:7.1f} g)  |  {stability}")
+                    sys.stdout.write(f"\r  {display_weight/1000:6.3f} kg  ({display_weight:7.1f} g)  |  {stability}        ")
                 else:
-                    print(f"  #{reading_num:4d}  |  {display_weight:7.1f} g  |  {stability}")
+                    sys.stdout.write(f"\r  {display_weight:7.1f} g  |  {stability}        ")
+            
+            sys.stdout.flush()
 
-            time.sleep(args.interval)
+            # Sleep slightly to prevent 100% CPU usage, but fast enough to poll sensor natively
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
-        print("\n\n✅ Stopped. Final reading: {:.1f} g".format(weight if not args.no_cal else 0))
+        print("\n\n✅ Stopped. Final reading: {:.1f} g".format(display_weight if not args.no_cal else 0))
     finally:
         hx.cleanup()
 

@@ -414,24 +414,43 @@ def main():
                 elif key in ('+', '='):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.01)
-                    print(f"\n  🔧 Scale Factor adjusted: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+1.0%)")
+                    print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+1.0%)")
+                    # Reset filters so new scale takes effect immediately
+                    kalman_filter.set_initial(0.0)
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    last_reported_weight = None
+                    is_stable = False
                 elif key in ('-', '_'):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 0.99)
-                    print(f"\n  🔧 Scale Factor adjusted: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-1.0%)")
+                    print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-1.0%)")
+                    kalman_filter.set_initial(0.0)
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    last_reported_weight = None
+                    is_stable = False
                 elif key in ('>', '.'):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.001)
-                    print(f"\n  🔧 Scale Factor adjusted: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+0.1%)")
+                    print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+0.1%)")
+                    kalman_filter.set_initial(0.0)
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    last_reported_weight = None
+                    is_stable = False
                 elif key in ('<', ','):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 0.999)
-                    print(f"\n  🔧 Scale Factor adjusted: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-0.1%)")
+                    print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-0.1%)")
+                    kalman_filter.set_initial(0.0)
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    last_reported_weight = None
+                    is_stable = False
                 elif key in ('c', 'C'):
                     prompt_live_calibration(hx, key_listener, args.cal)
-                    outlier_filter.clear()
-                    recent_estimates.clear()
+                    # CRITICAL: Reset ALL filters after scale factor change
+                    kalman_filter.set_initial(0.0)
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
+                    is_stable = False
                 elif key in ('s', 'S'):
                     hx.save_calibration(args.cal)
                     print(f"\n  💾 Saved to '{args.cal}' (Scale: {hx.REFERENCE_UNIT:.2f}, Offset: {hx.OFFSET:.0f})")

@@ -129,9 +129,9 @@ class ScaleWorker(QThread):
             self._tare_requested = True
 
     def get_current_weight(self):
-        """Thread-safe accessor for the latest stable/smoothed weight."""
+        """Thread-safe accessor for the latest stable/smoothed weight (clamped to >= 0.0g)."""
         with self._lock:
-            return self._current_weight
+            return max(0.0, self._current_weight)
 
     def stop(self):
         """Signal thread to stop and wait for exit."""
@@ -196,9 +196,11 @@ class ScaleWorker(QThread):
                 # 2. Denys Sene 1D Kalman filter
                 filtered_weight = self.kalman_filter.update(despiked)
 
-                # 3. Deadband snap to 0.0g
-                if abs(filtered_weight) < 2.0:
-                    filtered_weight = 0.0
+                # 3. Deadband snap & clamp negative weights to 0.0g
+                if abs(filtered_weight) < 2.0 or filtered_weight < 0.0:
+                    display_weight = 0.0
+                else:
+                    display_weight = filtered_weight
 
                 # 4. Stability detection
                 self.recent_estimates.append(filtered_weight)
@@ -208,18 +210,18 @@ class ScaleWorker(QThread):
                     is_stable = (spread <= SCALE_STABILITY_VARIANCE)
 
                 with self._lock:
-                    self._current_weight = filtered_weight
+                    self._current_weight = display_weight
                     self._is_stable = is_stable
 
-                # Emit live weight
-                self.sig_weight_updated.emit(filtered_weight, is_stable)
+                # Emit live weight (never negative)
+                self.sig_weight_updated.emit(display_weight, is_stable)
 
                 # Check for settled item placement/removal events
                 if is_stable:
-                    delta = filtered_weight - self._last_settled_weight
+                    delta = display_weight - self._last_settled_weight
                     if abs(delta) >= 3.0: # Minimum 3g change to trigger settled event
-                        self._last_settled_weight = filtered_weight
-                        self.sig_weight_settled.emit(delta, filtered_weight)
+                        self._last_settled_weight = display_weight
+                        self.sig_weight_settled.emit(delta, display_weight)
 
             except Exception as e:
                 print(f"[SCALE] Read error: {e}")

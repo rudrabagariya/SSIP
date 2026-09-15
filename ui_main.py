@@ -184,10 +184,12 @@ class SmartKiosk(QMainWindow):
 
         # Initialize scale worker
         self.scale_worker = None
+        self.verification_in_progress = False
         if SCALE_ENABLED:
             try:
                 self.scale_worker = ScaleWorker(self)
                 self.scale_worker.sig_weight_updated.connect(self.on_scale_weight_updated)
+                self.scale_worker.sig_weight_settled.connect(self.on_trolley_weight_settled)
                 self.scale_worker.start()
                 # Run startup tare dialog once UI is rendered
                 QTimer.singleShot(700, self.start_startup_tare)
@@ -315,14 +317,72 @@ class SmartKiosk(QMainWindow):
         overlay.exec_()
 
     def on_scale_weight_updated(self, live_weight, is_stable):
-        """Update live scale weight indicator on the cart screen."""
-        if hasattr(self, 'cart_weight_label'):
+        """Update live trolley weight indicator on the cart screen."""
+        if hasattr(self, 'cart_weight_label') and self.cart_weight_label:
             expected_total = sum(item.get('weight_grams', 0.0) * item.get('qty', 1) for item in self.cart)
             dot = "🟢" if is_stable else "🟡"
+            disp_weight = max(0.0, live_weight)
             if expected_total > 0:
-                self.cart_weight_label.setText(f"⚖️ Scale: {live_weight:.1f}g  {dot}  (Exp: {expected_total:.1f}g)")
+                self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}  (Exp: {expected_total:.1f}g)")
             else:
-                self.cart_weight_label.setText(f"⚖️ Scale: {live_weight:.1f}g  {dot}")
+                self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}")
+
+    def on_trolley_weight_settled(self, delta, total_weight):
+        """
+        Triggered when weight settles in the trolley.
+        If weight drops significantly (item taken out), automatically detect which
+        item was removed, remove/decrement it from the cart, and show an auto-closing popup.
+        """
+        if getattr(self, 'verification_in_progress', False) or getattr(self, 'payment_in_progress', False):
+            return
+
+        if not self.cart:
+            return
+
+        # An item was removed from the trolley (delta <= -5.0g)
+        if delta <= -5.0:
+            lost_weight = abs(delta)
+            self.handle_item_removed_from_trolley(lost_weight)
+
+    def handle_item_removed_from_trolley(self, lost_weight):
+        """Find the cart item whose weight best matches the lost weight and remove one unit."""
+        best_match_idx = None
+        best_match_diff = float('inf')
+        matched_actual_weight = None
+
+        for idx, item in enumerate(self.cart):
+            actual_list = item.get("actual_weights", [])
+            candidate_weights = actual_list if actual_list else [item.get("weight_grams", 0.0)]
+            
+            for cw in candidate_weights:
+                if cw <= 0:
+                    continue
+                diff = abs(cw - lost_weight)
+                # Flexible tolerance window for removal matching
+                tolerance = max(SCALE_WEIGHT_TOLERANCE_GRAMS * 1.5, cw * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
+                if diff <= tolerance and diff < best_match_diff:
+                    best_match_diff = diff
+                    best_match_idx = idx
+                    matched_actual_weight = cw
+
+        if best_match_idx is not None:
+            removed_item = self.cart[best_match_idx]
+            item_name = removed_item["name"]
+            
+            # Remove the specific matched actual weight from list
+            if removed_item.get("actual_weights") and matched_actual_weight in removed_item["actual_weights"]:
+                removed_item["actual_weights"].remove(matched_actual_weight)
+
+            # Decrement quantity
+            removed_item["qty"] -= 1
+            if removed_item["qty"] <= 0:
+                del self.cart[best_match_idx]
+
+            self.refresh_cart_display()
+
+            # Show auto-closing notification popup (5 seconds)
+            dlg = ItemRemovedOverlay(self, item_name, lost_weight, auto_close_secs=5)
+            dlg.exec_()
 
     def setup_ui(self):
         self.central = QWidget()
@@ -586,7 +646,7 @@ class SmartKiosk(QMainWindow):
         self.clear_btn.setCursor(Qt.PointingHandCursor)
         cart_actions.addWidget(self.clear_btn)
 
-        self.zero_scale_btn = QPushButton("⚖️ Zero Scale")
+        self.zero_scale_btn = QPushButton("🛒 Zero Trolley")
         self.zero_scale_btn.setObjectName("zeroScaleBtn")
         self.zero_scale_btn.clicked.connect(self.start_startup_tare)
         self.zero_scale_btn.setMinimumHeight(self.dp(44))
@@ -595,7 +655,7 @@ class SmartKiosk(QMainWindow):
 
         cart_actions.addStretch()
 
-        self.cart_weight_label = QLabel("⚖️ Scale: 0.0g  🟢")
+        self.cart_weight_label = QLabel("🛒 Trolley: 0.0g  🟢")
         self.cart_weight_label.setObjectName("cartWeightLabel")
         self.cart_weight_label.setStyleSheet(f"font-size: {self.fs_px(15)}px; font-weight: 700; color: #0284c7; padding-right: 12px;")
         cart_actions.addWidget(self.cart_weight_label)
@@ -1728,7 +1788,7 @@ class SmartKiosk(QMainWindow):
             diff = abs(current_scale - expected_total)
             tolerance = max(SCALE_WEIGHT_TOLERANCE_GRAMS * len(self.cart), expected_total * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
             if diff > tolerance:
-                weight_warn = QLabel(f"⚠️ Cart Weight Discrepancy:\nScale reads {current_scale:.1f}g (Expected ~{expected_total:.1f}g).\nPlease verify items in the bagging area.")
+                weight_warn = QLabel(f"⚠️ Trolley Weight Discrepancy:\nTrolley reads {current_scale:.1f}g (Expected ~{expected_total:.1f}g).\nPlease verify items inside the trolley.")
                 weight_warn.setWordWrap(True)
                 weight_warn.setAlignment(Qt.AlignCenter)
                 weight_warn.setStyleSheet("font-size: 14px; color: #b91c1c; background-color: #fef2f2; padding: 10px; border-radius: 8px; border: 1px solid #fca5a5; font-weight: 600;")
@@ -2232,28 +2292,35 @@ class SmartKiosk(QMainWindow):
                 return
 
             weight_grams = float(row["weight_grams"] or 0.0) if "weight_grams" in row.keys() else 0.0
+            actual_w = weight_grams
 
-            # Active item-by-item verification on scale
+            # Active item-by-item verification on trolley
             if self.scale_worker and weight_grams > 0:
-                dlg = ItemWeightVerificationOverlay(
-                    self, 
-                    self.scale_worker, 
-                    row["name"], 
-                    weight_grams * qty,
-                    tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
-                    tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
-                )
-                if dlg.exec_() != QDialog.Accepted:
-                    return
+                self.verification_in_progress = True
+                try:
+                    dlg = ItemWeightVerificationOverlay(
+                        self, 
+                        self.scale_worker, 
+                        row["name"], 
+                        weight_grams * qty,
+                        tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                    )
+                    if dlg.exec_() != QDialog.Accepted:
+                        return
+                    actual_w = getattr(dlg, 'measured_weight', weight_grams)
+                finally:
+                    self.verification_in_progress = False
 
             # Check if the product is already in the cart
             for item in self.cart:
                 if item["barcode"] == barcode:
                     item["qty"] += qty
+                    item.setdefault("actual_weights", []).append(actual_w)
                     self.refresh_cart_display()
                     return
 
-            # Add new product to the cart, including GST and HSN details
+            # Add new product to the cart, including GST, HSN, and recorded actual weight
             self.cart.append({
                 "barcode": barcode, 
                 "name": row["name"], 
@@ -2261,7 +2328,8 @@ class SmartKiosk(QMainWindow):
                 "qty": qty,
                 "gst_percent": float(row["gst_percent"]),
                 "hsn_code": row["hsn_code"],
-                "weight_grams": weight_grams
+                "weight_grams": weight_grams,
+                "actual_weights": [actual_w]
             })
             self.refresh_cart_display()
 
@@ -2306,14 +2374,14 @@ class SmartKiosk(QMainWindow):
         has_items = len(self.cart) > 0
         self.pay_btn.setEnabled(has_items)
 
-        # Update live scale weight indicator
-        if hasattr(self, 'cart_weight_label') and getattr(self, 'scale_worker', None):
-            live_w = self.scale_worker.get_current_weight()
+        # Update live trolley weight indicator
+        if hasattr(self, 'cart_weight_label') and getattr(self, 'scale_worker', None) and self.cart_weight_label:
+            live_w = max(0.0, self.scale_worker.get_current_weight())
             expected_total = sum(item.get("weight_grams", 0.0) * item.get("qty", 1) for item in self.cart)
             if expected_total > 0:
-                self.cart_weight_label.setText(f"⚖️ Scale: {live_w:.1f}g  (Exp: {expected_total:.1f}g)")
+                self.cart_weight_label.setText(f"🛒 Trolley: {live_w:.1f}g  (Exp: {expected_total:.1f}g)")
             else:
-                self.cart_weight_label.setText(f"⚖️ Scale: {live_w:.1f}g")
+                self.cart_weight_label.setText(f"🛒 Trolley: {live_w:.1f}g")
 
     def create_quantity_widget(self, row, qty):
         # Outer wrapper to center content vertically
@@ -2359,16 +2427,26 @@ class SmartKiosk(QMainWindow):
         if 0 <= row < len(self.cart):
             item = self.cart[row]
             if delta > 0 and self.scale_worker and item.get("weight_grams", 0) > 0:
-                dlg = ItemWeightVerificationOverlay(
-                    self,
-                    self.scale_worker,
-                    item["name"],
-                    item["weight_grams"],
-                    tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
-                    tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
-                )
-                if dlg.exec_() != QDialog.Accepted:
-                    return
+                self.verification_in_progress = True
+                try:
+                    dlg = ItemWeightVerificationOverlay(
+                        self,
+                        self.scale_worker,
+                        item["name"],
+                        item["weight_grams"],
+                        tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                    )
+                    if dlg.exec_() != QDialog.Accepted:
+                        return
+                    measured_w = getattr(dlg, 'measured_weight', item["weight_grams"])
+                    item.setdefault("actual_weights", []).append(measured_w)
+                finally:
+                    self.verification_in_progress = False
+            elif delta < 0:
+                if item.get("actual_weights"):
+                    item["actual_weights"].pop()
+
             item["qty"] += delta
             if item["qty"] <= 0:
                 self.remove_item(row)

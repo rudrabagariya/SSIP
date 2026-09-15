@@ -211,7 +211,7 @@ class TouchInputDialog(OverlayDialog):
 class ScaleTareOverlay(OverlayDialog):
     """
     Animated fullscreen/modal overlay shown on startup or manual tare.
-    Displays tare progress, instructions to leave platform empty, and offset confirmation.
+    Displays tare progress, instructions to leave trolley empty, and offset confirmation.
     """
     def __init__(self, parent, scale_worker):
         super().__init__(parent)
@@ -219,17 +219,17 @@ class ScaleTareOverlay(OverlayDialog):
         self.content_container.setFixedWidth(520)
 
         # Icon / Header
-        icon_label = QLabel("⚖️")
+        icon_label = QLabel("🛒")
         icon_label.setAlignment(Qt.AlignCenter)
         icon_label.setStyleSheet("font-size: 48px; margin-bottom: 5px;")
         self.content_layout.addWidget(icon_label)
 
-        title_label = QLabel("Zeroing Weighing Scale")
+        title_label = QLabel("Zeroing Smart Trolley")
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b;")
         self.content_layout.addWidget(title_label)
 
-        sub_label = QLabel("Please ensure the scale platform is empty and untouched.")
+        sub_label = QLabel("Please ensure the trolley is empty and untouched.")
         sub_label.setAlignment(Qt.AlignCenter)
         sub_label.setWordWrap(True)
         sub_label.setStyleSheet("font-size: 14px; color: #64748b; margin-bottom: 15px;")
@@ -289,7 +289,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
     """
     Active item-by-item verification dialog.
     Triggered when an item with weight_grams > 0 is scanned.
-    Waits for the user to place the item on the scale platform,
+    Waits for the user to place the item into the trolley,
     tracks the weight delta, and validates against expected weight.
     """
     def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0):
@@ -299,6 +299,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.expected_weight = float(expected_weight)
         self.tolerance_pct = tolerance_pct
         self.tolerance_g = tolerance_g
+        self.measured_weight = self.expected_weight
 
         # Compute acceptable bounds
         tol = max(self.tolerance_g, self.expected_weight * (self.tolerance_pct / 100.0))
@@ -310,7 +311,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.content_container.setFixedWidth(540)
 
         # Title
-        title_label = QLabel("📦 Place Item on Scale")
+        title_label = QLabel("📦 Place Item into Trolley")
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b; margin-bottom: 4px;")
         self.content_layout.addWidget(title_label)
@@ -343,7 +344,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
         rb_layout.addWidget(self.live_diff_label)
 
-        self.live_status_label = QLabel("Place the item on the scale platform to verify")
+        self.live_status_label = QLabel("Place the item into the trolley to verify")
         self.live_status_label.setAlignment(Qt.AlignCenter)
         self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
         rb_layout.addWidget(self.live_status_label)
@@ -400,7 +401,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
 
         if diff <= 2.0:
             self.live_diff_label.setText("Waiting for item...")
-            self.live_status_label.setText("Place the item on the scale platform")
+            self.live_status_label.setText("Place the item into the trolley")
             self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
             return
 
@@ -410,6 +411,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         if self.min_weight <= diff <= self.max_weight:
             if is_stable:
                 self.verified = True
+                self.measured_weight = round(diff, 1)
                 self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
                 self.live_status_label.setText("Weight matched! Adding to cart...")
                 self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
@@ -433,4 +435,83 @@ class ItemWeightVerificationOverlay(OverlayDialog):
 
     def on_skip(self):
         # Allow staff or customer override
+        self.measured_weight = self.expected_weight
         self.accept()
+
+
+class ItemRemovedOverlay(OverlayDialog):
+    """
+    Auto-closing alert shown when an item is removed from the trolley.
+    Dismisses automatically after 5 seconds or when OK is tapped.
+    """
+    def __init__(self, parent, product_name, weight_removed, auto_close_secs=5):
+        super().__init__(parent)
+        self.content_container.setFixedWidth(500)
+        self.remaining_secs = auto_close_secs
+
+        # Icon / Header
+        icon_label = QLabel("📤")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("font-size: 44px; margin-bottom: 5px;")
+        self.content_layout.addWidget(icon_label)
+
+        title_label = QLabel("Item Removed from Trolley")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #dc2626;")
+        self.content_layout.addWidget(title_label)
+
+        # Removed item box
+        box = QFrame()
+        box.setStyleSheet("background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 12px; padding: 12px;")
+        b_layout = QVBoxLayout(box)
+        b_layout.setContentsMargins(12, 10, 12, 10)
+
+        name_label = QLabel(product_name)
+        name_label.setAlignment(Qt.AlignCenter)
+        name_label.setStyleSheet("font-size: 18px; font-weight: 700; color: #991b1b;")
+        name_label.setWordWrap(True)
+        b_layout.addWidget(name_label)
+
+        weight_label = QLabel(f"Weight removed: -{weight_removed:.1f} g")
+        weight_label.setAlignment(Qt.AlignCenter)
+        weight_label.setStyleSheet("font-size: 14px; color: #b91c1c; font-weight: 600; margin-top: 4px;")
+        b_layout.addWidget(weight_label)
+        self.content_layout.addWidget(box)
+
+        sub_label = QLabel("Item has been removed from your cart automatically.")
+        sub_label.setAlignment(Qt.AlignCenter)
+        sub_label.setWordWrap(True)
+        sub_label.setStyleSheet("font-size: 14px; color: #475569; font-weight: 500; margin: 6px 0;")
+        self.content_layout.addWidget(sub_label)
+
+        # OK button with auto-close countdown
+        self.ok_btn = QPushButton(f"OK ({self.remaining_secs}s)")
+        self.ok_btn.setMinimumHeight(48)
+        self.ok_btn.setCursor(Qt.PointingHandCursor)
+        self.ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ef4444;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background-color: #dc2626; }
+        """)
+        self.ok_btn.clicked.connect(self.accept)
+        self.content_layout.addWidget(self.ok_btn)
+
+        # Countdown timer (ticks every 1 second)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_tick)
+        self.timer.start(1000)
+
+    def on_tick(self):
+        self.remaining_secs -= 1
+        if self.remaining_secs <= 0:
+            self.timer.stop()
+            self.accept()
+        else:
+            self.ok_btn.setText(f"OK ({self.remaining_secs}s)")
+

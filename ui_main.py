@@ -334,6 +334,9 @@ class SmartKiosk(QMainWindow):
         If weight increases significantly without active scan verification, warn customer
         to scan the barcode first.
         """
+        if getattr(self, '_clearing_trolley_active', False):
+            return
+
         if getattr(self, 'payment_in_progress', False):
             if abs(delta) >= 10.0:
                 expected_w = 0.0
@@ -3474,9 +3477,13 @@ class SmartKiosk(QMainWindow):
                     
                 # Ask user to clear trolley
                 if getattr(self, 'scale_worker', None):
-                    clear_dlg = ClearTrolleyVerificationOverlay(self, self.scale_worker)
-                    if clear_dlg.exec_() == QDialog.Accepted:
-                        dlg.accept()
+                    self._clearing_trolley_active = True
+                    try:
+                        clear_dlg = ClearTrolleyVerificationOverlay(self, self.scale_worker)
+                        if clear_dlg.exec_() == QDialog.Accepted:
+                            dlg.accept()
+                    finally:
+                        self._clearing_trolley_active = False
                 else:
                     dlg.accept()
 

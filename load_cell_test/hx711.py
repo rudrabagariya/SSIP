@@ -84,23 +84,22 @@ class HX711:
         Read one raw 24-bit signed value from the HX711.
         Returns an integer in the range [-8388608, 8388607].
         """
+        # Ensure SCK is LOW before read
+        GPIO.output(self.pd_sck_pin, GPIO.LOW)
         self._wait_ready()
 
         # Read 24 data bits (MSB first)
+        # DO NOT time.sleep() here — RPi.GPIO C call overhead is ~1-2µs, which is within HX711 spec.
         raw = 0
         for _ in range(24):
             GPIO.output(self.pd_sck_pin, GPIO.HIGH)
-            time.sleep(0.000001)  # 1 µs pulse — well within HX711 spec
-            raw = (raw << 1) | GPIO.input(self.dout_pin)
             GPIO.output(self.pd_sck_pin, GPIO.LOW)
-            time.sleep(0.000001)
+            raw = (raw << 1) | GPIO.input(self.dout_pin)
 
         # Send extra pulses to set gain for the NEXT conversion
         for _ in range(self._pulses - 24):
             GPIO.output(self.pd_sck_pin, GPIO.HIGH)
-            time.sleep(0.000001)
             GPIO.output(self.pd_sck_pin, GPIO.LOW)
-            time.sleep(0.000001)
 
         # Convert from 24-bit two's complement
         if raw & 0x800000:

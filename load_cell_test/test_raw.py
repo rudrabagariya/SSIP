@@ -19,35 +19,40 @@ import RPi.GPIO as GPIO
 
 
 def read_hx711_raw(dout_pin, sck_pin, gain_pulses=25):
-    """Read one raw 24-bit value from HX711 — minimal implementation."""
+    """Read one raw 24-bit value from HX711."""
+    # Ensure SCK is LOW before waiting
+    GPIO.output(sck_pin, GPIO.LOW)
+
     # Wait for DOUT to go LOW (data ready)
-    timeout = time.time() + 5
+    timeout = time.time() + 3.0
     while GPIO.input(dout_pin) == 1:
         if time.time() > timeout:
             return None  # Sensor not responding
-        time.sleep(0.001)
+        time.sleep(0.0005)
 
     # Read 24 bits
+    # IMPORTANT: DO NOT use time.sleep() inside this loop!
+    # On Linux, time.sleep() yields to the OS scheduler and sleeps for 60-100+ microseconds.
+    # The HX711 datasheet states that holding SCK HIGH for > 60µs forces the chip into
+    # POWER DOWN mode, which causes DOUT to go HIGH and return all 1s (raw value -1).
+    # In Python, the RPi.GPIO C call overhead itself is ~1-2 µs, which is ideal timing.
     raw = 0
     for _ in range(24):
         GPIO.output(sck_pin, GPIO.HIGH)
-        time.sleep(0.000001)
-        raw = (raw << 1) | GPIO.input(dout_pin)
         GPIO.output(sck_pin, GPIO.LOW)
-        time.sleep(0.000001)
+        raw = (raw << 1) | GPIO.input(dout_pin)
 
-    # Extra pulses for gain setting
+    # Extra pulses for gain setting (25 pulses = Gain 128 on Channel A)
     for _ in range(gain_pulses - 24):
         GPIO.output(sck_pin, GPIO.HIGH)
-        time.sleep(0.000001)
         GPIO.output(sck_pin, GPIO.LOW)
-        time.sleep(0.000001)
 
-    # Two's complement
+    # Convert 24-bit two's complement to signed integer
     if raw & 0x800000:
         raw -= 0x1000000
 
     return raw
+
 
 
 def main():
@@ -133,8 +138,23 @@ def main():
         print(f"   Spread  : {spread}")
         print()
 
-        if all(v == 0 for v in values):
-            print("⚠️  All values are zero — load cell may not be connected to HX711")
+        if all(v == -1 for v in values):
+            print("❌ All readings are -1 (0xFFFFFF — all 24 bits were 1)!")
+            print("   This means DOUT stayed HIGH during the entire clocking sequence.")
+            print()
+            print("   Check these 3 common causes:")
+            print("   1. PHYSICAL PIN VS BCM NUMBER:")
+            print(f"      You ran with GPIO {args.dout} and GPIO {args.sck}.")
+            print(f"      - DOUT must be connected to Physical Pin {_bcm_to_board(args.dout)} (GPIO {args.dout})")
+            print(f"      - SCK  must be connected to Physical Pin {_bcm_to_board(args.sck)} (GPIO {args.sck})")
+            print("      NOTE: Physical Pin 6 is GND! If you plugged SCK into Pin 6, it is connected to GND!")
+            print("   2. VCC VOLTAGE (Why it worked on Arduino):")
+            print("      Arduinos provide 5V. Many HX711 boards have an on-board 4.3V regulator that fails")
+            print("      if given 3.3V. If your HX711 has an LED that is dim/off on 3.3V, it needs 5V.")
+            print("   3. SWAPPED WIRES:")
+            print("      Try running with pins swapped: sudo python3 test_raw.py --dout 6 --sck 5")
+        elif all(v == 0 for v in values):
+            print("⚠️  All values are zero — load cell bridge may not be connected to HX711")
             print("   Check E+, E-, A+, A- wiring from load cells to HX711")
         elif all(v == values[0] for v in values):
             print("⚠️  All values identical — sensor might be stuck")

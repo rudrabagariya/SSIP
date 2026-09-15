@@ -116,11 +116,12 @@ def robust_tare(hx, samples=500, show_progress=True):
     """
     High-precision tare taking `samples` readings, trimming top & bottom 20%
     outliers, and computing clean zero baseline with an animated progress bar.
+    Prints a full diagnostic report of the sample distribution.
     """
     # 1. Warm-up reads to flush any stale ADC buffers
-    for _ in range(3):
+    for _ in range(5):
         hx.read_long()
-        time.sleep(0.01)
+        time.sleep(0.02)
 
     collected = []
     start_time = time.time()
@@ -144,20 +145,66 @@ def robust_tare(hx, samples=500, show_progress=True):
         sys.stdout.write("\n")
         sys.stdout.flush()
 
+    elapsed_total = time.time() - start_time
+
     # Sort and trim top & bottom 20%
     collected.sort()
     trim = max(1, int(len(collected) * 0.20))
+    discarded_low = collected[:trim]
+    discarded_high = collected[-trim:]
     clean_samples = collected[trim:-trim]
 
     new_offset = sum(clean_samples) / len(clean_samples)
-    spread = max(clean_samples) - min(clean_samples)
     
     mean = new_offset
     variance = sum((x - mean) ** 2 for x in clean_samples) / len(clean_samples)
     std_dev = math.sqrt(variance)
 
+    # Diagnostic report
+    print(f"  ┌─────────────── TARE DIAGNOSTIC ───────────────┐")
+    print(f"  │ Total samples collected : {samples:6d}               │")
+    print(f"  │ Time taken              : {elapsed_total:6.1f}s              │")
+    print(f"  │ Discarded (bottom 20%)  : {len(discarded_low):6d} samples        │")
+    print(f"  │   Range: {min(discarded_low):10.0f} to {max(discarded_low):10.0f}       │")
+    print(f"  │ Discarded (top 20%)     : {len(discarded_high):6d} samples        │")
+    print(f"  │   Range: {min(discarded_high):10.0f} to {max(discarded_high):10.0f}       │")
+    print(f"  │ KEPT (clean middle 60%) : {len(clean_samples):6d} samples        │")
+    print(f"  │   Min:   {min(clean_samples):10.0f}                    │")
+    print(f"  │   Max:   {max(clean_samples):10.0f}                    │")
+    print(f"  │   Spread:{max(clean_samples) - min(clean_samples):10.0f} counts             │")
+    print(f"  │   StdDev:    ±{std_dev:8.1f} counts             │")
+    print(f"  │ ─────────────────────────────────────────────  │")
+    print(f"  │ ✅ OFFSET SET TO: {new_offset:10.0f}                  │")
+    print(f"  └────────────────────────────────────────────────┘")
+
     hx.set_offset(new_offset)
-    return new_offset, spread, std_dev
+    return new_offset, std_dev
+
+
+def warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates, warmup_count=20):
+    """
+    Silently fill the filter buffers with real readings BEFORE reporting
+    any weight to the user. This prevents the first reported value from
+    being a raw noisy spike.
+    """
+    outlier_filter.clear()
+    recent_estimates.clear()
+
+    sys.stdout.write("  🔄 Warming up filters...")
+    sys.stdout.flush()
+
+    for i in range(warmup_count):
+        raw_val = hx.get_value(times=1)
+        raw_weight = raw_val / hx.REFERENCE_UNIT if hx.REFERENCE_UNIT else 0.0
+        outlier_filter.add(raw_weight)
+        despiked = outlier_filter.get_smoothed()
+        filtered = kalman_filter.update(despiked)
+        recent_estimates.append(filtered)
+        time.sleep(0.08)
+
+    # Show the first post-warmup filtered value as confirmation
+    final_val = kalman_filter.update(outlier_filter.get_smoothed())
+    print(f" done! (First filtered reading: {final_val:+.1f} g)")
 
 
 def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samples=30):
@@ -318,12 +365,23 @@ def main():
             print("     You can press [c] anytime to calibrate live.\n")
             args.no_cal = True
 
+    # Filters (create BEFORE tare so warmup can use them)
+    outlier_filter = KallhovdRollingFilter(size=8)
+    kalman_filter = SimpleKalmanFilter(mea_e=3.0, est_e=3.0, q=0.05)
+    kalman_filter.set_initial(0.0)
+    recent_estimates = deque(maxlen=6)
+    last_reported_weight = None
+    is_stable = False
+    reading_count = 0
+
     # 1. High-accuracy 500-sample tare at startup
     if not args.no_cal and not args.no_tare:
         print(f"  ⚖️  Performing high-precision zero tare ({args.tare_samples} samples)...")
         print("     Please leave platform completely empty and do not touch wires.")
-        offset, spread, std = robust_tare(hx, samples=args.tare_samples)
-        print(f"  ✅ Zero confirmed: 0.0g (Offset: {offset:.0f} | Noise StdDev: ±{std:.1f} counts)\n")
+        offset, std = robust_tare(hx, samples=args.tare_samples)
+        # Warmup filters so first reported value is clean
+        warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+        print()
 
     print("  Keyboard Commands (Live):")
     print(f"    [t] Re-tare to 0.0g ({args.tare_samples} samples with progress bar)")
@@ -334,16 +392,6 @@ def main():
     print("    [q] Quit")
     print("-" * 65)
     print("  Monitoring scale...\n")
-
-    # Filters
-    outlier_filter = KallhovdRollingFilter(size=8)
-    kalman_filter = SimpleKalmanFilter(mea_e=3.0, est_e=3.0, q=0.05)
-    kalman_filter.set_initial(0.0)
-
-    recent_estimates = deque(maxlen=6)
-    last_reported_weight = None
-    is_stable = False
-    reading_count = 0
 
     key_listener = KeyListener()
 
@@ -357,13 +405,12 @@ def main():
                     break
                 elif key in ('t', 'T'):
                     print(f"\n  ⚖️  Re-taring ({args.tare_samples} samples)... please keep platform empty...")
-                    offset, spread, std = robust_tare(hx, samples=args.tare_samples)
-                    outlier_filter.clear()
+                    offset, std = robust_tare(hx, samples=args.tare_samples)
                     kalman_filter.set_initial(0.0)
-                    recent_estimates.clear()
                     last_reported_weight = None
                     is_stable = False
-                    print(f"  ✅ Zero confirmed: 0.0g (Offset: {offset:.0f} | StdDev: ±{std:.1f})\n")
+                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    print()
                 elif key in ('+', '='):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.01)

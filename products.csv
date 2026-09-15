@@ -8,3 +8,6 @@ barcode,name,price,gst_percent,hsn_code,weight_grams,quantity
 7.89E+11,Katak Batak,15.0,12.0,21069099,0.0,191360
 123,test,100.0,11.0,47328973,0.0,122237
 555,milk,34.0,3.0,21345677,0.0,334
+101,Maggi Double Pack,30.0,12.0,19023010,140.0,100
+102,Jain Farsan Mart Namkeen,75.0,12.0,21069099,250.0,100
+103,Maggi Pazzta Cheese Macaroni,35.0,12.0,19023010,75.0,100

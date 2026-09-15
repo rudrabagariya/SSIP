@@ -17,15 +17,68 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 
 from hx711 import HX711
 
 
-import statistics
-from collections import deque
+class SimpleKalmanFilter:
+    """
+    1D Kalman Filter implementation for single variable models.
+    Based on Denys Sene's SimpleKalmanFilter (used in Arduino/ESP/Pi digital scales).
+    """
+    def __init__(self, mea_e=3.0, est_e=3.0, q=0.05):
+        """
+        mea_e: Measurement Uncertainty (noise standard deviation, e.g. ±3g)
+        est_e: Estimation Uncertainty (how much to trust initial state)
+        q: Process Noise (how fast true weight can change, smaller = smoother)
+        """
+        self._err_measure = mea_e
+        self._err_estimate = est_e
+        self._q = q
+        self._current_estimate = 0.0
+        self._last_estimate = 0.0
+        self._kalman_gain = 0.0
+
+    def set_initial(self, val):
+        self._current_estimate = val
+        self._last_estimate = val
+
+    def update(self, mea):
+        self._kalman_gain = self._err_estimate / (self._err_estimate + self._err_measure)
+        self._current_estimate = self._last_estimate + self._kalman_gain * (mea - self._last_estimate)
+        self._err_estimate = (1.0 - self._kalman_gain) * self._err_estimate + abs(self._last_estimate - self._current_estimate) * self._q
+        self._last_estimate = self._current_estimate
+        return self._current_estimate
+
+
+class KallhovdRollingFilter:
+    """
+    Rolling dataset with Outlier Rejection.
+    Based on Olav Kallhovd's HX711_ADC library (smoothedData algorithm).
+    Discards the highest and lowest spikes, averages the rest.
+    """
+    def __init__(self, size=8):
+        self.buffer = deque(maxlen=size)
+
+    def add(self, val):
+        self.buffer.append(val)
+
+    def get_smoothed(self):
+        if not self.buffer:
+            return 0.0
+        if len(self.buffer) < 3:
+            return sum(self.buffer) / len(self.buffer)
+        
+        # Kallhovd algorithm: sum all, subtract min, subtract max, divide by (N - 2)
+        total = sum(self.buffer)
+        low = min(self.buffer)
+        high = max(self.buffer)
+        return (total - low - high) / (len(self.buffer) - 2)
+
 
 def main():
-    parser = argparse.ArgumentParser(description="HX711 Continuous Weight Reader")
+    parser = argparse.ArgumentParser(description="HX711 Stable Weight Reader for Small Products")
     parser.add_argument("--dout", type=int, default=5,
                         help="GPIO pin for HX711 DOUT (default: 5)")
     parser.add_argument("--sck", type=int, default=6,
@@ -34,14 +87,10 @@ def main():
                         help="Amplifier gain (default: 128)")
     parser.add_argument("--cal", type=str, default="calibration.json",
                         help="Calibration file path (default: calibration.json)")
-    parser.add_argument("--interval", type=float, default=0.5,
-                        help="Seconds between console updates (default: 0.5)")
-    parser.add_argument("--window", type=int, default=5,
-                        help="Sliding window size for outlier rejection (default: 5)")
-    parser.add_argument("--smooth", type=float, default=0.3,
-                        help="EMA smoothing factor 0.05-1.0 (default: 0.3, lower = smoother)")
-    parser.add_argument("--deadband", type=float, default=3.0,
-                        help="Grams near zero to suppress to 0.0g (default: 3.0)")
+    parser.add_argument("--deadband", type=float, default=2.0,
+                        help="Grams near zero to snap to 0.0g (default: 2.0g)")
+    parser.add_argument("--stability-variance", type=float, default=1.5,
+                        help="Max gram difference in 1 sec to declare STABLE (default: 1.5g)")
     parser.add_argument("--raw", action="store_true",
                         help="Also display raw ADC values")
     parser.add_argument("--no-cal", action="store_true",
@@ -49,7 +98,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  HX711 Advanced Weight Reader (Median + EMA Filter)")
+    print("  HX711 Dual-Stage Filter (Kallhovd Trimmed Mean + Kalman)")
+    print("  Tuned for: 50kg scale measuring 30-40g items")
     print("=" * 60)
 
     try:
@@ -69,56 +119,81 @@ def main():
             args.no_cal = True
 
     print()
-    print(f"  Filter: Window={args.window}, Smooth={args.smooth} | Deadband: ±{args.deadband}g | Interval: {args.interval}s")
+    print(f"  Stability window: ±{args.stability_variance}g | Zero deadband: ±{args.deadband}g")
     print("  Press Ctrl+C to stop")
     print("-" * 60)
-    print()
+    print("  Reading weight...\n")
+
+    # Initialize Filters
+    outlier_filter = KallhovdRollingFilter(size=8)
+    kalman_filter = SimpleKalmanFilter(mea_e=3.0, est_e=3.0, q=0.05)
+    
+    recent_estimates = deque(maxlen=6)
+    last_reported_weight = None
+    is_stable = False
+    reading_count = 0
 
     try:
-        reading_num = 0
-        history = []
-        last_printed_weight = -9999.0
-        STABLE_THRESHOLD = 5.0  # Allow 5g of variance to be considered "stable"
-        
-        print("  Waiting for stable weight...")
+        # Pre-seed filters with initial tare
+        initial_raw = hx.get_value(times=3) if not args.no_cal else 0
+        initial_weight = initial_raw / hx.REFERENCE_UNIT if (not args.no_cal and hx.REFERENCE_UNIT) else 0.0
+        kalman_filter.set_initial(initial_weight)
 
         while True:
-            reading_num += 1
-
-            # Let the HX711 library handle the basic sampling
-            weight = hx.read_weight(times=args.samples) if not args.no_cal else 0
-            raw = hx.read_raw(times=args.samples) if (args.no_cal or args.raw) else 0
+            reading_count += 1
             
-            if args.no_cal or args.raw:
-                # If raw mode, just print everything so they can debug
-                print(f"  #{reading_num:4d} | Raw: {raw:10d} | Weight: {weight:7.1f}g")
-                time.sleep(0.5)
+            # 1. Acquire single fast reading from HX711
+            if args.no_cal:
+                raw_sample = hx.read_long()
+                print(f"  #{reading_count:4d} | Raw: {raw_sample}")
+                time.sleep(0.1)
                 continue
 
-            # Add to history buffer for stability checking
-            history.append(weight)
-            if len(history) > 3:
-                history.pop(0)
+            raw_val = hx.get_value(times=1)
+            raw_weight = raw_val / hx.REFERENCE_UNIT if hx.REFERENCE_UNIT else 0.0
 
-            # Check if we have enough readings and they are stable
-            if len(history) == 3:
-                variance = max(history) - min(history)
+            # 2. Stage 1: Kallhovd Outlier Rejection (removes transient spikes)
+            outlier_filter.add(raw_weight)
+            despiked_weight = outlier_filter.get_smoothed()
+
+            # 3. Stage 2: 1D Kalman Filter (locks still values, fast response on load)
+            filtered_weight = kalman_filter.update(despiked_weight)
+
+            # Snap deadband around 0
+            if abs(filtered_weight) < args.deadband:
+                filtered_weight = 0.0
+
+            # 4. Stability Detection Window
+            recent_estimates.append(filtered_weight)
+            
+            if len(recent_estimates) == recent_estimates.maxlen:
+                spread = max(recent_estimates) - min(recent_estimates)
                 
-                if variance <= STABLE_THRESHOLD:
-                    stable_weight = sum(history) / len(history)
+                # Check if readings have settled within stability threshold
+                if spread <= args.stability_variance:
+                    current_stable = round(sum(recent_estimates) / len(recent_estimates), 1)
                     
-                    # Clean up near-zero noise
-                    if abs(stable_weight) < args.deadband:
-                        stable_weight = 0.0
-
-                    # Only print if it's a NEW stable weight (don't spam the console)
-                    if abs(stable_weight - last_printed_weight) > STABLE_THRESHOLD:
-                        if stable_weight >= 1000:
-                            print(f"\n✅ STABLE: {stable_weight/1000:6.3f} kg  ({stable_weight:7.1f} g)")
-                        else:
-                            print(f"\n✅ STABLE: {stable_weight:7.1f} g")
+                    # Snap deadband
+                    if abs(current_stable) < args.deadband:
+                        current_stable = 0.0
+                    
+                    # If this is a new stable weight or state change
+                    if last_reported_weight is None or abs(current_stable - last_reported_weight) >= 1.0:
+                        last_reported_weight = current_stable
+                        is_stable = True
                         
-                        last_printed_weight = stable_weight
+                        if current_stable == 0.0:
+                            print(f"🟢 [STABLE] Platform empty  -->  0.0 g")
+                        else:
+                            print(f"🟢 [STABLE] Weight: {current_stable:5.1f} g  (variance: {spread:.2f}g)")
+                else:
+                    # Weight is moving / being placed
+                    if is_stable:
+                        print(f"⏳ Settling... (live: {filtered_weight:5.1f} g)", end="\r")
+                        is_stable = False
+
+            # Brief pause to align with HX711 update cycle (~10Hz)
+            time.sleep(0.08)
 
     except KeyboardInterrupt:
         print("\n\n✅ Stopped.")

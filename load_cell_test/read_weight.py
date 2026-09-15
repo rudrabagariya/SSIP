@@ -21,6 +21,9 @@ import time
 from hx711 import HX711
 
 
+import statistics
+from collections import deque
+
 def main():
     parser = argparse.ArgumentParser(description="HX711 Continuous Weight Reader")
     parser.add_argument("--dout", type=int, default=5,
@@ -31,12 +34,12 @@ def main():
                         help="Amplifier gain (default: 128)")
     parser.add_argument("--cal", type=str, default="calibration.json",
                         help="Calibration file path (default: calibration.json)")
-    parser.add_argument("--interval", type=float, default=0.3,
-                        help="Seconds between readings (default: 0.3)")
-    parser.add_argument("--samples", type=int, default=5,
-                        help="Samples per reading for median filter (default: 5)")
-    parser.add_argument("--smooth", type=float, default=0.25,
-                        help="EMA smoothing factor 0.05-1.0 (default: 0.25, lower = smoother)")
+    parser.add_argument("--interval", type=float, default=0.5,
+                        help="Seconds between console updates (default: 0.5)")
+    parser.add_argument("--window", type=int, default=5,
+                        help="Sliding window size for outlier rejection (default: 5)")
+    parser.add_argument("--smooth", type=float, default=0.3,
+                        help="EMA smoothing factor 0.05-1.0 (default: 0.3, lower = smoother)")
     parser.add_argument("--deadband", type=float, default=3.0,
                         help="Grams near zero to suppress to 0.0g (default: 3.0)")
     parser.add_argument("--raw", action="store_true",
@@ -46,7 +49,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  HX711 Continuous Weight Reader (with Adaptive Smoothing)")
+    print("  HX711 Advanced Weight Reader (Median + EMA Filter)")
     print("=" * 60)
 
     try:
@@ -66,7 +69,7 @@ def main():
             args.no_cal = True
 
     print()
-    print(f"  Smoothing: {args.smooth} | Deadband: ±{args.deadband}g | Samples: {args.samples}")
+    print(f"  Filter: Window={args.window}, Smooth={args.smooth} | Deadband: ±{args.deadband}g | Interval: {args.interval}s")
     print("  Press Ctrl+C to stop")
     print("-" * 60)
     print()
@@ -77,26 +80,33 @@ def main():
         stable_weight = 0
         stable_count = 0
         STABLE_THRESHOLD = 2.0  # grams — readings within this range are "stable"
-        STEP_THRESHOLD = 15.0   # grams — sudden delta resets smoothing instantly
+        STEP_THRESHOLD = 20.0   # grams — sudden delta resets smoothing instantly
+        
+        # Sliding window for outlier rejection
+        window_buffer = deque(maxlen=args.window)
 
         while True:
             reading_num += 1
 
-            # Read instant calibrated weight
-            weight_instant = hx.read_weight(times=args.samples) if not args.no_cal else 0
+            # Read 1 fast sample from HX711
+            weight_instant = hx.read_weight(times=1) if not args.no_cal else 0
             raw = hx.read_raw(times=1) if (args.no_cal or args.raw) else 0
+            
+            # 1. Outlier Rejection (Sliding Median)
+            window_buffer.append(weight_instant)
+            median_weight = statistics.median(window_buffer)
 
-            # Adaptive Exponential Moving Average (EMA)
+            # 2. Adaptive Exponential Moving Average (EMA)
             if smoothed_weight is None:
-                smoothed_weight = weight_instant
+                smoothed_weight = median_weight
             else:
                 # If user placed or removed an item suddenly, snap immediately
-                if abs(weight_instant - smoothed_weight) > STEP_THRESHOLD:
-                    smoothed_weight = weight_instant
+                if abs(median_weight - smoothed_weight) > STEP_THRESHOLD:
+                    smoothed_weight = median_weight
                 else:
-                    smoothed_weight = (args.smooth * weight_instant) + ((1.0 - args.smooth) * smoothed_weight)
+                    smoothed_weight = (args.smooth * median_weight) + ((1.0 - args.smooth) * smoothed_weight)
 
-            # Auto-zero deadband near 0
+            # 3. Auto-zero deadband near 0
             if abs(smoothed_weight) < args.deadband:
                 display_weight = 0.0
             else:

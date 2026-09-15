@@ -160,6 +160,8 @@ class SmartKiosk(QMainWindow):
         self.payment_in_progress = False
         self.admin_verified = False
         self.admin_screen = None
+        self.scale_worker = None
+        self.cart_weight_label = None
 
         self.setup_ui()
         self.theme_changed.connect(self.apply_theme)
@@ -2305,7 +2307,7 @@ class SmartKiosk(QMainWindow):
         self.pay_btn.setEnabled(has_items)
 
         # Update live scale weight indicator
-        if hasattr(self, 'cart_weight_label') and self.scale_worker:
+        if hasattr(self, 'cart_weight_label') and getattr(self, 'scale_worker', None):
             live_w = self.scale_worker.get_current_weight()
             expected_total = sum(item.get("weight_grams", 0.0) * item.get("qty", 1) for item in self.cart)
             if expected_total > 0:

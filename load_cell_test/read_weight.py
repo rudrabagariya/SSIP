@@ -119,10 +119,15 @@ def robust_tare(hx, samples=500, show_progress=True):
     outliers, and computing clean zero baseline with an animated progress bar.
     Prints a full diagnostic report of the sample distribution.
     """
-    # 1. Warm-up reads to flush any stale ADC buffers
-    for _ in range(5):
+    # 1. Thermal & excitation warm-up reads to flush bridge drift
+    sys.stdout.write("  🔌 Stabilizing bridge excitation & thermal drift...")
+    sys.stdout.flush()
+    warmup_start = time.time()
+    while time.time() - warmup_start < 2.5:
         hx.read_long()
-        time.sleep(0.02)
+        time.sleep(0.05)
+    sys.stdout.write(" ready.\n")
+    sys.stdout.flush()
 
     collected = []
     start_time = time.time()
@@ -269,8 +274,8 @@ def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samp
         clean = raw_diffs[trim:-trim]
         avg_diff = sum(clean) / len(clean)
 
-        if avg_diff <= 0:
-            print(f"  ❌ Error: Net weight difference is non-positive ({avg_diff:.0f}).")
+        if abs(avg_diff) < 50:
+            print(f"  ❌ Error: No significant weight change detected (diff={avg_diff:.0f}).")
             print("     Make sure the platform was empty during tare and weight is placed properly.")
             return False
 
@@ -362,8 +367,8 @@ def main():
                         help="Grams near zero to snap to 0.0g (default: 2.0g)")
     parser.add_argument("--stability-variance", type=float, default=1.5,
                         help="Max gram difference in 1 sec to declare STABLE (default: 1.5g)")
-    parser.add_argument("--tare-samples", type=int, default=500,
-                        help="Samples to use for high-precision tare (default: 500)")
+    parser.add_argument("--tare-samples", type=int, default=200,
+                        help="Samples to use for high-precision tare (default: 200)")
     parser.add_argument("--no-tare", action="store_true",
                         help="Skip automatic zero tare at startup")
     parser.add_argument("--raw", action="store_true",

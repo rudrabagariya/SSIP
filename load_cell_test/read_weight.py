@@ -76,66 +76,52 @@ def main():
 
     try:
         reading_num = 0
-        smoothed_weight = None
-        stable_weight = 0
-        stable_count = 0
-        STABLE_THRESHOLD = 2.0  # grams — readings within this range are "stable"
-        STEP_THRESHOLD = 20.0   # grams — sudden delta resets smoothing instantly
+        history = []
+        last_printed_weight = -9999.0
+        STABLE_THRESHOLD = 5.0  # Allow 5g of variance to be considered "stable"
         
-        # Sliding window for outlier rejection
-        window_buffer = deque(maxlen=args.window)
+        print("  Waiting for stable weight...")
 
         while True:
             reading_num += 1
 
-            # Read 1 fast sample from HX711
-            weight_instant = hx.read_weight(times=1) if not args.no_cal else 0
-            raw = hx.read_raw(times=1) if (args.no_cal or args.raw) else 0
+            # Let the HX711 library handle the basic sampling
+            weight = hx.read_weight(times=args.samples) if not args.no_cal else 0
+            raw = hx.read_raw(times=args.samples) if (args.no_cal or args.raw) else 0
             
-            # 1. Outlier Rejection (Sliding Median)
-            window_buffer.append(weight_instant)
-            median_weight = statistics.median(window_buffer)
-
-            # 2. Adaptive Exponential Moving Average (EMA)
-            if smoothed_weight is None:
-                smoothed_weight = median_weight
-            else:
-                # If user placed or removed an item suddenly, snap immediately
-                if abs(median_weight - smoothed_weight) > STEP_THRESHOLD:
-                    smoothed_weight = median_weight
-                else:
-                    smoothed_weight = (args.smooth * median_weight) + ((1.0 - args.smooth) * smoothed_weight)
-
-            # 3. Auto-zero deadband near 0
-            if abs(smoothed_weight) < args.deadband:
-                display_weight = 0.0
-            else:
-                display_weight = smoothed_weight
-
-            # Stability detection
-            if abs(display_weight - stable_weight) < STABLE_THRESHOLD:
-                stable_count += 1
-            else:
-                stable_weight = display_weight
-                stable_count = 0
-
-            stability = "📌 STABLE" if stable_count >= 3 else "⏳ settling..."
-
             if args.no_cal or args.raw:
-                sys.stdout.write(f"\r  #{reading_num:4d} | Raw: {raw:10d} | Inst: {weight_instant:6.1f}g | Smooth: {display_weight:6.1f}g | {stability}    ")
-            else:
-                if display_weight >= 1000:
-                    sys.stdout.write(f"\r  {display_weight/1000:6.3f} kg  ({display_weight:7.1f} g)  |  {stability}        ")
-                else:
-                    sys.stdout.write(f"\r  {display_weight:7.1f} g  |  {stability}        ")
-            
-            sys.stdout.flush()
+                # If raw mode, just print everything so they can debug
+                print(f"  #{reading_num:4d} | Raw: {raw:10d} | Weight: {weight:7.1f}g")
+                time.sleep(0.5)
+                continue
 
-            # Sleep slightly to prevent 100% CPU usage, but fast enough to poll sensor natively
-            time.sleep(0.05)
+            # Add to history buffer for stability checking
+            history.append(weight)
+            if len(history) > 3:
+                history.pop(0)
+
+            # Check if we have enough readings and they are stable
+            if len(history) == 3:
+                variance = max(history) - min(history)
+                
+                if variance <= STABLE_THRESHOLD:
+                    stable_weight = sum(history) / len(history)
+                    
+                    # Clean up near-zero noise
+                    if abs(stable_weight) < args.deadband:
+                        stable_weight = 0.0
+
+                    # Only print if it's a NEW stable weight (don't spam the console)
+                    if abs(stable_weight - last_printed_weight) > STABLE_THRESHOLD:
+                        if stable_weight >= 1000:
+                            print(f"\n✅ STABLE: {stable_weight/1000:6.3f} kg  ({stable_weight:7.1f} g)")
+                        else:
+                            print(f"\n✅ STABLE: {stable_weight:7.1f} g")
+                        
+                        last_printed_weight = stable_weight
 
     except KeyboardInterrupt:
-        print("\n\n✅ Stopped. Final reading: {:.1f} g".format(display_weight if not args.no_cal else 0))
+        print("\n\n✅ Stopped.")
     finally:
         hx.cleanup()
 

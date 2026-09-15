@@ -185,6 +185,9 @@ class SmartKiosk(QMainWindow):
         # Initialize scale worker
         self.scale_worker = None
         self.verification_in_progress = False
+        self._unscanned_overlay_active = False
+        self._item_removed_overlay_active = False
+        self.unscanned_items_weights = []
         if SCALE_ENABLED:
             try:
                 self.scale_worker = ScaleWorker(self)
@@ -328,20 +331,63 @@ class SmartKiosk(QMainWindow):
         Triggered when weight settles in the trolley.
         If weight drops significantly (item taken out), automatically detect which
         item was removed, remove/decrement it from the cart, and show an auto-closing popup.
+        If weight increases significantly without active scan verification, warn customer
+        to scan the barcode first.
         """
-        if getattr(self, 'verification_in_progress', False) or getattr(self, 'payment_in_progress', False):
-            return
-
-        if not self.cart:
+        if (getattr(self, 'verification_in_progress', False) or 
+            getattr(self, 'payment_in_progress', False) or 
+            getattr(self, '_unscanned_overlay_active', False) or 
+            getattr(self, '_item_removed_overlay_active', False)):
             return
 
         # An item was removed from the trolley (delta <= -5.0g)
         if delta <= -5.0:
             lost_weight = abs(delta)
+
+            # Check if this removal matches an unscanned item that the user was prompted to remove
+            matched_unscanned_idx = None
+            for idx, uw in enumerate(getattr(self, 'unscanned_items_weights', [])):
+                diff = abs(uw - lost_weight)
+                tol = max(SCALE_WEIGHT_TOLERANCE_GRAMS * 1.5, uw * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
+                if diff <= tol:
+                    matched_unscanned_idx = idx
+                    break
+
+            if matched_unscanned_idx is not None:
+                # The user removed the unscanned item as requested
+                self.unscanned_items_weights.pop(matched_unscanned_idx)
+                return
+
+            if not self.cart:
+                return
+
             self.handle_item_removed_from_trolley(lost_weight)
+            return
+
+        # An unscanned item was placed into the trolley (delta >= 5.0g)
+        if delta >= 5.0:
+            self.handle_unscanned_item_placed(delta)
+
+    def handle_unscanned_item_placed(self, added_weight):
+        """Show warning popup when an item is placed into the trolley without scanning first."""
+        if (getattr(self, 'verification_in_progress', False) or 
+            getattr(self, 'payment_in_progress', False) or 
+            getattr(self, '_unscanned_overlay_active', False)):
+            return
+
+        self._unscanned_overlay_active = True
+        self.unscanned_items_weights.append(added_weight)
+        try:
+            dlg = UnscannedItemOverlay(self, added_weight, auto_close_secs=6)
+            dlg.exec_()
+        finally:
+            self._unscanned_overlay_active = False
 
     def handle_item_removed_from_trolley(self, lost_weight):
         """Find the cart item whose weight best matches the lost weight and remove one unit."""
+        if getattr(self, '_item_removed_overlay_active', False):
+            return
+
         best_match_idx = None
         best_match_diff = float('inf')
         matched_actual_weight = None
@@ -377,8 +423,12 @@ class SmartKiosk(QMainWindow):
             self.refresh_cart_display()
 
             # Show auto-closing notification popup (5 seconds)
-            dlg = ItemRemovedOverlay(self, item_name, lost_weight, auto_close_secs=5)
-            dlg.exec_()
+            self._item_removed_overlay_active = True
+            try:
+                dlg = ItemRemovedOverlay(self, item_name, lost_weight, auto_close_secs=5)
+                dlg.exec_()
+            finally:
+                self._item_removed_overlay_active = False
 
     def setup_ui(self):
         self.central = QWidget()
@@ -2308,6 +2358,12 @@ class SmartKiosk(QMainWindow):
                 finally:
                     self.verification_in_progress = False
 
+            # If this weight was previously tracked as unscanned, clear it now that it's verified
+            for uw in list(self.unscanned_items_weights):
+                if abs(uw - actual_w) <= max(SCALE_WEIGHT_TOLERANCE_GRAMS * 1.5, actual_w * 0.15):
+                    self.unscanned_items_weights.remove(uw)
+                    break
+
             # Check if the product is already in the cart
             for item in self.cart:
                 if item["barcode"] == barcode:
@@ -2452,6 +2508,7 @@ class SmartKiosk(QMainWindow):
 
     def clear_cart(self):
         self.cart = []
+        self.unscanned_items_weights = []
         self.refresh_cart_display()
 
     def start_payment_flow(self):

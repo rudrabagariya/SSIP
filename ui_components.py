@@ -397,6 +397,10 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         if self.verified:
             return
 
+        # If user lifted an item that was already resting on the trolley, adjust baseline
+        if current_weight < (self.initial_weight - 5.0):
+            self.initial_weight = current_weight
+
         diff = current_weight - self.initial_weight
 
         if diff <= 2.0:
@@ -511,4 +515,92 @@ class ItemRemovedOverlay(OverlayDialog):
             self.accept()
         else:
             self.ok_btn.setText(f"OK ({self.remaining_secs}s)")
+
+
+class UnscannedItemOverlay(OverlayDialog):
+    """
+    Auto-closing warning popup shown when an unscanned/unknown item is placed into the trolley.
+    Dismisses automatically after specified seconds (default 6) or when OK is tapped.
+    """
+    def __init__(self, parent, added_weight, auto_close_secs=6):
+        super().__init__(parent)
+        self.content_container.setFixedWidth(520)
+        self.remaining_secs = auto_close_secs
+
+        # Top Warning Icon
+        icon_label = QLabel("⚠️")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("font-size: 48px; margin-bottom: 2px;")
+        self.content_layout.addWidget(icon_label)
+
+        # Title
+        title_label = QLabel("Unscanned Item Detected")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #b45309;")
+        self.content_layout.addWidget(title_label)
+
+        # Warning Card Box
+        box = QFrame()
+        box.setStyleSheet("""
+            QFrame {
+                background-color: #fffbeb;
+                border: 2px solid #fcd34d;
+                border-radius: 12px;
+                padding: 12px;
+            }
+        """)
+        b_layout = QVBoxLayout(box)
+        b_layout.setContentsMargins(14, 12, 14, 12)
+        b_layout.setSpacing(6)
+
+        msg_label = QLabel("Please first scan the item barcode before putting it onto the trolley.")
+        msg_label.setAlignment(Qt.AlignCenter)
+        msg_label.setWordWrap(True)
+        msg_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #92400e;")
+        b_layout.addWidget(msg_label)
+
+        weight_label = QLabel(f"Detected Weight: +{added_weight:.1f} g")
+        weight_label.setAlignment(Qt.AlignCenter)
+        weight_label.setStyleSheet("font-size: 15px; color: #b45309; font-weight: 600; margin-top: 4px;")
+        b_layout.addWidget(weight_label)
+        self.content_layout.addWidget(box)
+
+        # Subtitle instruction
+        sub_label = QLabel("Please remove the item from the trolley and scan its barcode to add it to your cart.")
+        sub_label.setAlignment(Qt.AlignCenter)
+        sub_label.setWordWrap(True)
+        sub_label.setStyleSheet("font-size: 14px; color: #475569; font-weight: 500; margin: 4px 0;")
+        self.content_layout.addWidget(sub_label)
+
+        # Action button with countdown timer
+        self.ok_btn = QPushButton(f"OK, I will scan ({self.remaining_secs}s)")
+        self.ok_btn.setMinimumHeight(48)
+        self.ok_btn.setCursor(Qt.PointingHandCursor)
+        self.ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f59e0b;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background-color: #d97706; }
+            QPushButton:pressed { background-color: #b45309; }
+        """)
+        self.ok_btn.clicked.connect(self.accept)
+        self.content_layout.addWidget(self.ok_btn)
+
+        # Auto-close timer
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_tick)
+        self.timer.start(1000)
+
+    def on_tick(self):
+        self.remaining_secs -= 1
+        if self.remaining_secs <= 0:
+            self.timer.stop()
+            self.accept()
+        else:
+            self.ok_btn.setText(f"OK, I will scan ({self.remaining_secs}s)")
 

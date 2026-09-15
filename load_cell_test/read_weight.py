@@ -76,6 +76,7 @@ class SimpleKalmanFilter:
     def set_initial(self, val):
         self._current_estimate = val
         self._last_estimate = val
+        self._err_estimate = self._err_measure
 
     def update(self, mea):
         self._kalman_gain = self._err_estimate / (self._err_estimate + self._err_measure)
@@ -181,30 +182,41 @@ def robust_tare(hx, samples=500, show_progress=True):
     return new_offset, std_dev
 
 
-def warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates, warmup_count=20):
+def sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates, samples=5):
     """
-    Silently fill the filter buffers with real readings BEFORE reporting
-    any weight to the user. This prevents the first reported value from
-    being a raw noisy spike.
+    Immediately synchronize all filter states (Kalman, Kallhovd rolling, stability buffer)
+    to the sensor's CURRENT physical reading.
+    Eliminates filter lag, creeping values, and stale state transitions.
     """
     outlier_filter.clear()
     recent_estimates.clear()
 
-    sys.stdout.write("  🔄 Warming up filters...")
+    sys.stdout.write("  🔄 Syncing filters to current weight...")
     sys.stdout.flush()
 
-    for i in range(warmup_count):
-        raw_val = hx.get_value(times=1)
-        raw_weight = raw_val / hx.REFERENCE_UNIT if hx.REFERENCE_UNIT else 0.0
-        outlier_filter.add(raw_weight)
-        despiked = outlier_filter.get_smoothed()
-        filtered = kalman_filter.update(despiked)
-        recent_estimates.append(filtered)
-        time.sleep(0.08)
+    # Take a few fast readings to sample current steady weight
+    readings = []
+    for _ in range(samples):
+        val = hx.get_value(times=1)
+        w = val / hx.REFERENCE_UNIT if hx.REFERENCE_UNIT else 0.0
+        readings.append(w)
+        time.sleep(0.02)
 
-    # Show the first post-warmup filtered value as confirmation
-    final_val = kalman_filter.update(outlier_filter.get_smoothed())
-    print(f" done! (First filtered reading: {final_val:+.1f} g)")
+    readings.sort()
+    current_weight = readings[len(readings) // 2] if readings else 0.0
+
+    # Initialize Kalman filter directly to current weight
+    kalman_filter.set_initial(current_weight)
+
+    # Pre-fill rolling filter buffer with this median weight
+    for _ in range(outlier_filter.buffer.maxlen):
+        outlier_filter.add(current_weight)
+    
+    # Pre-fill stability queue so user gets an immediate accurate reading
+    for _ in range(recent_estimates.maxlen):
+        recent_estimates.append(current_weight)
+
+    print(f" done! (Current reading: {current_weight:+.1f} g)")
 
 
 def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samples=30):
@@ -218,20 +230,29 @@ def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samp
         print("\n" + "=" * 62)
         print("  🎯 MULTI-SAMPLE CALIBRATION & VERIFICATION")
         print("=" * 62)
-        print("  Place your known reference weight (e.g. 50g, 100g) on the scale.")
-        val_str = input("  Enter known weight in grams (or press Enter to cancel): ").strip()
+        print("  Note: Platform should have been tared (empty) beforehand.")
+        val_str = input("  Enter known weight in grams (e.g. 500, 1160) [or Enter to cancel]: ").strip()
         
         if not val_str:
             print("  ❌ Cancelled.")
-            return
+            return False
 
-        known_weight = float(val_str)
+        try:
+            known_weight = float(val_str)
+        except ValueError:
+            print(f"  ❌ Invalid number: '{val_str}'")
+            return False
+
         if known_weight <= 0:
             print("  ❌ Weight must be greater than 0.")
-            return
+            return False
+
+        input(f"\n  👉 Place the {known_weight}g object on the platform.\n"
+              f"     Press Enter when it is placed and completely still...")
+        print()
 
         # ── Phase 1: Reference Acquisition ──
-        print(f"\n  [Phase 1/2] Sampling {samples} readings with {known_weight}g on scale...")
+        print(f"  [Phase 1/2] Sampling {samples} readings with {known_weight}g on scale...")
         raw_diffs = []
         for i in range(1, samples + 1):
             diff = hx.get_value(times=1)
@@ -250,8 +271,8 @@ def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samp
 
         if avg_diff <= 0:
             print(f"  ❌ Error: Net weight difference is non-positive ({avg_diff:.0f}).")
-            print("     Make sure the known weight is placed properly on the platform.")
-            return
+            print("     Make sure the platform was empty during tare and weight is placed properly.")
+            return False
 
         tentative_scale = avg_diff / known_weight
         hx.set_reference_unit(tentative_scale)
@@ -296,27 +317,33 @@ def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samp
         print(f"     Accuracy Error  : {error_g:+7.2f} g  ({error_pct:+.2f}%)")
         print(f"     Noise (StdDev)  : ±{v_std:5.2f} g")
         print(f"     Tested Range    : {min_w:.1f} g  to  {max_w:.1f} g")
+        print(f"     Old Scale Factor: {old_scale:.2f}")
         print(f"     New Scale Factor: {tentative_scale:.2f}")
         print(f"     Quality Grade   : {status}")
         print("-" * 62)
 
-        confirm = input(f"  Accept and save this calibration to '{cal_file}'? [y/n]: ").strip().lower()
-        if confirm == 'y':
+        confirm = input(f"  Accept and save this calibration to '{cal_file}'? [Y/n]: ").strip().lower()
+        if confirm in ('y', 'yes', ''):
             hx.save_calibration(cal_file)
-            print(f"  💾 Saved and applied! Scale Factor = {tentative_scale:.2f}")
+            print(f"  ✅ Saved to '{cal_file}' and applied! Scale Factor = {tentative_scale:.2f}")
+            print("=" * 62)
+            print("  Resuming live monitoring...\n")
+            return True
         else:
             hx.set_reference_unit(old_scale)
             print(f"  ↩️  Reverted back to previous scale factor ({old_scale:.2f}).")
-        
-        print("=" * 62)
-        print("  Resuming live monitoring...\n")
+            print("=" * 62)
+            print("  Resuming live monitoring...\n")
+            return False
     except Exception as e:
         hx.set_reference_unit(old_scale)
         print(f"  ❌ Calibration error: {e}")
+        return False
     finally:
         if key_listener.is_tty:
             try:
                 tty.setcbreak(sys.stdin.fileno())
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)
             except Exception:
                 pass
 
@@ -362,8 +389,8 @@ def main():
             print(f"  ✅ Calibration loaded: Scale Factor = {hx.REFERENCE_UNIT:.2f}")
         else:
             print(f"  ⚠️  Calibration file '{args.cal}' not found!")
-            print("     You can press [c] anytime to calibrate live.\n")
-            args.no_cal = True
+            print("     Running with uncalibrated scale (press [c] to calibrate live).\n")
+            # We do NOT set args.no_cal = True here, so the user can tare and then calibrate
 
     # Filters (create BEFORE tare so warmup can use them)
     outlier_filter = KallhovdRollingFilter(size=8)
@@ -379,8 +406,8 @@ def main():
         print(f"  ⚖️  Performing high-precision zero tare ({args.tare_samples} samples)...")
         print("     Please leave platform completely empty and do not touch wires.")
         offset, std = robust_tare(hx, samples=args.tare_samples)
-        # Warmup filters so first reported value is clean
-        warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+        # Sync filters so first reported value is clean 0.0g
+        sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
         print()
 
     print("  Keyboard Commands (Live):")
@@ -406,49 +433,42 @@ def main():
                 elif key in ('t', 'T'):
                     print(f"\n  ⚖️  Re-taring ({args.tare_samples} samples)... please keep platform empty...")
                     offset, std = robust_tare(hx, samples=args.tare_samples)
-                    kalman_filter.set_initial(0.0)
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
                     print()
                 elif key in ('+', '='):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.01)
                     print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+1.0%)")
-                    # Reset filters so new scale takes effect immediately
-                    kalman_filter.set_initial(0.0)
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
                 elif key in ('-', '_'):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 0.99)
                     print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-1.0%)")
-                    kalman_filter.set_initial(0.0)
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
                 elif key in ('>', '.'):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.001)
                     print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (+0.1%)")
-                    kalman_filter.set_initial(0.0)
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
                 elif key in ('<', ','):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 0.999)
                     print(f"\n  🔧 Scale Factor: {cur:.2f} ➔ {hx.REFERENCE_UNIT:.2f} (-0.1%)")
-                    kalman_filter.set_initial(0.0)
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
                 elif key in ('c', 'C'):
-                    prompt_live_calibration(hx, key_listener, args.cal)
-                    # CRITICAL: Reset ALL filters after scale factor change
-                    kalman_filter.set_initial(0.0)
-                    warmup_filters(hx, outlier_filter, kalman_filter, recent_estimates)
+                    if prompt_live_calibration(hx, key_listener, args.cal):
+                        args.no_cal = False
+                    sync_filters_to_current(hx, outlier_filter, kalman_filter, recent_estimates)
                     last_reported_weight = None
                     is_stable = False
                 elif key in ('s', 'S'):

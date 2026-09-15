@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-HX711 Continuous Weight Reader with Robust Tare and Live Calibration Tuning.
+HX711 Continuous Weight Reader with High-Precision Tare and Multi-Sample Verification.
 
 Features:
-  - 25-sample outlier-trimmed robust tare at startup and on-demand
+  - 500-sample outlier-trimmed robust tare with animated progress bar
+  - Multi-sample calibration with statistical verification report (Error, StdDev, Pass/Fail)
   - Dual-stage filtering: Olav Kallhovd outlier rejection + Denys Sene 1D Kalman filter
   - Live keyboard tuning:
-      [t] Re-tare to 0.0g (25-sample trimmed mean)
-      [c] Live calibrate with known weight on the scale
+      [t] Re-tare to 0.0g (500 samples with progress bar)
+      [c] Multi-sample calibration with statistical confirmation
       [+] Nudge scale factor +1%      [-] Nudge scale factor -1%
       [>] Fine-tune scale factor +0.1% [<] Fine-tune scale factor -0.1%
       [s] Save calibration to calibration.json
@@ -16,6 +17,7 @@ Features:
 
 import argparse
 import json
+import math
 import os
 import select
 import sys
@@ -110,43 +112,66 @@ class KallhovdRollingFilter:
         return (total - low - high) / (len(self.buffer) - 2)
 
 
-def robust_tare(hx, samples=25):
+def robust_tare(hx, samples=500, show_progress=True):
     """
-    Perform a high-accuracy tare by taking multiple samples,
-    trimming the top & bottom 25% outliers, and averaging the rest.
+    High-precision tare taking `samples` readings, trimming top & bottom 20%
+    outliers, and computing clean zero baseline with an animated progress bar.
     """
     # 1. Warm-up reads to flush any stale ADC buffers
     for _ in range(3):
         hx.read_long()
-        time.sleep(0.02)
+        time.sleep(0.01)
 
-    # 2. Collect samples
     collected = []
-    for _ in range(samples):
-        collected.append(hx.read_long())
-        time.sleep(0.04)
+    start_time = time.time()
+    
+    for i in range(1, samples + 1):
+        val = hx.read_long()
+        collected.append(val)
+        
+        if show_progress and (i % 5 == 0 or i == samples):
+            pct = int(i / samples * 100)
+            bar_len = 25
+            filled = int(bar_len * i // samples)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            elapsed = time.time() - start_time
+            rate = i / elapsed if elapsed > 0 else 10
+            remaining = (samples - i) / rate if rate > 0 else 0
+            sys.stdout.write(f"\r  [{bar}] {pct:3d}% ({i}/{samples}) | ADC: {val:8d} | {remaining:4.1f}s left ")
+            sys.stdout.flush()
 
-    # 3. Sort and trim outer 25%
+    if show_progress:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    # Sort and trim top & bottom 20%
     collected.sort()
-    trim = max(1, int(len(collected) * 0.25))
+    trim = max(1, int(len(collected) * 0.20))
     clean_samples = collected[trim:-trim]
 
-    # 4. Average clean samples
     new_offset = sum(clean_samples) / len(clean_samples)
     spread = max(clean_samples) - min(clean_samples)
     
+    mean = new_offset
+    variance = sum((x - mean) ** 2 for x in clean_samples) / len(clean_samples)
+    std_dev = math.sqrt(variance)
+
     hx.set_offset(new_offset)
-    return new_offset, spread
+    return new_offset, spread, std_dev
 
 
-def prompt_live_calibration(hx, key_listener, cal_file):
-    """Temporarily restore normal terminal mode to prompt for known weight."""
+def prompt_live_calibration(hx, key_listener, cal_file, samples=100, verify_samples=30):
+    """
+    Multi-sample calibration with statistical verification and confirmation test.
+    """
     key_listener.restore()
+    old_scale = hx.REFERENCE_UNIT
+
     try:
-        print("\n" + "=" * 55)
-        print("  🎯 LIVE CALIBRATION MODE")
-        print("=" * 55)
-        print("  Place your known reference weight on the scale.")
+        print("\n" + "=" * 62)
+        print("  🎯 MULTI-SAMPLE CALIBRATION & VERIFICATION")
+        print("=" * 62)
+        print("  Place your known reference weight (e.g. 50g, 100g) on the scale.")
         val_str = input("  Enter known weight in grams (or press Enter to cancel): ").strip()
         
         if not val_str:
@@ -158,34 +183,90 @@ def prompt_live_calibration(hx, key_listener, cal_file):
             print("  ❌ Weight must be greater than 0.")
             return
 
-        print(f"  Sampling 20 readings with {known_weight}g on platform...")
-        samples = []
-        for _ in range(20):
-            samples.append(hx.get_value(times=1))
-            time.sleep(0.05)
-        
-        samples.sort()
-        trim = max(1, int(len(samples) * 0.2))
-        clean = samples[trim:-trim]
-        raw_diff = sum(clean) / len(clean)
+        # ── Phase 1: Reference Acquisition ──
+        print(f"\n  [Phase 1/2] Sampling {samples} readings with {known_weight}g on scale...")
+        raw_diffs = []
+        for i in range(1, samples + 1):
+            diff = hx.get_value(times=1)
+            raw_diffs.append(diff)
+            if i % 5 == 0 or i == samples:
+                pct = int(i / samples * 100)
+                bar = '█' * (25 * i // samples) + '░' * (25 - (25 * i // samples))
+                sys.stdout.write(f"\r  [{bar}] {pct:3d}% ({i}/{samples}) | Diff: {diff:7.0f} ")
+                sys.stdout.flush()
+        sys.stdout.write("\n")
 
-        new_scale = raw_diff / known_weight
-        if new_scale == 0:
-            new_scale = 1.0
+        raw_diffs.sort()
+        trim = max(1, int(len(raw_diffs) * 0.20))
+        clean = raw_diffs[trim:-trim]
+        avg_diff = sum(clean) / len(clean)
 
-        hx.set_reference_unit(new_scale)
-        print(f"  ✅ New Scale Factor: {new_scale:.2f}")
+        if avg_diff <= 0:
+            print(f"  ❌ Error: Net weight difference is non-positive ({avg_diff:.0f}).")
+            print("     Make sure the known weight is placed properly on the platform.")
+            return
+
+        tentative_scale = avg_diff / known_weight
+        hx.set_reference_unit(tentative_scale)
+
+        # ── Phase 2: Live Verification Confirmation Test ──
+        print(f"\n  [Phase 2/2] Running Confirmation Test ({verify_samples} verification samples)...")
+        test_weights = []
+        for i in range(1, verify_samples + 1):
+            v = hx.get_weight(times=1)
+            test_weights.append(v)
+            if i % 3 == 0 or i == verify_samples:
+                pct = int(i / verify_samples * 100)
+                bar = '█' * (25 * i // verify_samples) + '░' * (25 - (25 * i // verify_samples))
+                sys.stdout.write(f"\r  [{bar}] {pct:3d}% ({i}/{verify_samples}) | Measured: {v:5.1f}g ")
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+
+        test_weights.sort()
+        trim_v = max(1, int(len(test_weights) * 0.15))
+        clean_test = test_weights[trim_v:-trim_v]
         
-        save = input(f"  Save to '{cal_file}' right now? (y/n): ").strip().lower()
-        if save == 'y':
+        measured_mean = sum(clean_test) / len(clean_test)
+        error_g = measured_mean - known_weight
+        error_pct = (error_g / known_weight) * 100.0
+        
+        v_variance = sum((x - measured_mean) ** 2 for x in clean_test) / len(clean_test)
+        v_std = math.sqrt(v_variance)
+        min_w = min(clean_test)
+        max_w = max(clean_test)
+
+        if abs(error_pct) < 1.0:
+            status = "EXCELLENT (PASS) ✅"
+        elif abs(error_pct) < 3.0:
+            status = "ACCEPTABLE ⚠️"
+        else:
+            status = "POOR (FAIL) ❌"
+
+        print("-" * 62)
+        print("  📊 CALIBRATION CONFIRMATION REPORT:")
+        print(f"     Expected Weight : {known_weight:7.2f} g")
+        print(f"     Tested Average  : {measured_mean:7.2f} g")
+        print(f"     Accuracy Error  : {error_g:+7.2f} g  ({error_pct:+.2f}%)")
+        print(f"     Noise (StdDev)  : ±{v_std:5.2f} g")
+        print(f"     Tested Range    : {min_w:.1f} g  to  {max_w:.1f} g")
+        print(f"     New Scale Factor: {tentative_scale:.2f}")
+        print(f"     Quality Grade   : {status}")
+        print("-" * 62)
+
+        confirm = input(f"  Accept and save this calibration to '{cal_file}'? [y/n]: ").strip().lower()
+        if confirm == 'y':
             hx.save_calibration(cal_file)
-            print(f"  💾 Calibration saved to '{cal_file}'.")
-        print("=" * 55)
+            print(f"  💾 Saved and applied! Scale Factor = {tentative_scale:.2f}")
+        else:
+            hx.set_reference_unit(old_scale)
+            print(f"  ↩️  Reverted back to previous scale factor ({old_scale:.2f}).")
+        
+        print("=" * 62)
         print("  Resuming live monitoring...\n")
     except Exception as e:
+        hx.set_reference_unit(old_scale)
         print(f"  ❌ Calibration error: {e}")
     finally:
-        # Re-enable cbreak for live key listener
         if key_listener.is_tty:
             try:
                 tty.setcbreak(sys.stdin.fileno())
@@ -194,7 +275,7 @@ def prompt_live_calibration(hx, key_listener, cal_file):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HX711 Stable Weight Reader with Live Calibration")
+    parser = argparse.ArgumentParser(description="HX711 Stable Weight Reader with High-Precision Tare")
     parser.add_argument("--dout", type=int, default=5,
                         help="GPIO pin for HX711 DOUT (default: 5)")
     parser.add_argument("--sck", type=int, default=6,
@@ -207,8 +288,8 @@ def main():
                         help="Grams near zero to snap to 0.0g (default: 2.0g)")
     parser.add_argument("--stability-variance", type=float, default=1.5,
                         help="Max gram difference in 1 sec to declare STABLE (default: 1.5g)")
-    parser.add_argument("--tare-samples", type=int, default=25,
-                        help="Samples to use for robust zero tare (default: 25)")
+    parser.add_argument("--tare-samples", type=int, default=500,
+                        help="Samples to use for high-precision tare (default: 500)")
     parser.add_argument("--no-tare", action="store_true",
                         help="Skip automatic zero tare at startup")
     parser.add_argument("--raw", action="store_true",
@@ -218,7 +299,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 65)
-    print("  HX711 Robust Reader & Live Calibration (50kg / 30-40g Tuning)")
+    print("  HX711 High-Precision Weight Reader & Multi-Sample Calibrator")
     print("=" * 65)
 
     try:
@@ -237,15 +318,16 @@ def main():
             print("     You can press [c] anytime to calibrate live.\n")
             args.no_cal = True
 
-    # 1. High-accuracy 25-sample tare at startup
+    # 1. High-accuracy 500-sample tare at startup
     if not args.no_cal and not args.no_tare:
-        print(f"  ⚖️  Auto-taring with {args.tare_samples} samples (leave platform empty)...")
-        offset, spread = robust_tare(hx, samples=args.tare_samples)
-        print(f"  ✅ Tared cleanly to 0.0g (Offset: {offset:.0f}, Noise Spread: {spread} counts)\n")
+        print(f"  ⚖️  Performing high-precision zero tare ({args.tare_samples} samples)...")
+        print("     Please leave platform completely empty and do not touch wires.")
+        offset, spread, std = robust_tare(hx, samples=args.tare_samples)
+        print(f"  ✅ Zero confirmed: 0.0g (Offset: {offset:.0f} | Noise StdDev: ±{std:.1f} counts)\n")
 
     print("  Keyboard Commands (Live):")
-    print("    [t] Re-tare to 0.0g (25 samples)")
-    print("    [c] Calibrate live with known weight on scale")
+    print(f"    [t] Re-tare to 0.0g ({args.tare_samples} samples with progress bar)")
+    print("    [c] Multi-sample calibration with confirmation test")
     print("    [+] Scale +1%      [-] Scale -1%")
     print("    [>] Scale +0.1%    [<] Scale -0.1%")
     print("    [s] Save calibration to file")
@@ -274,14 +356,14 @@ def main():
                     print("\n  Quitting...")
                     break
                 elif key in ('t', 'T'):
-                    print("\n  ⚖️  Re-taring (25 samples)... please keep platform empty...")
-                    offset, spread = robust_tare(hx, samples=args.tare_samples)
+                    print(f"\n  ⚖️  Re-taring ({args.tare_samples} samples)... please keep platform empty...")
+                    offset, spread, std = robust_tare(hx, samples=args.tare_samples)
                     outlier_filter.clear()
                     kalman_filter.set_initial(0.0)
                     recent_estimates.clear()
                     last_reported_weight = None
                     is_stable = False
-                    print(f"  ✅ Zero confirmed: 0.0g (Offset: {offset:.0f})\n")
+                    print(f"  ✅ Zero confirmed: 0.0g (Offset: {offset:.0f} | StdDev: ±{std:.1f})\n")
                 elif key in ('+', '='):
                     cur = hx.REFERENCE_UNIT or 1.0
                     hx.set_reference_unit(cur * 1.01)

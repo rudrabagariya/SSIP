@@ -366,9 +366,10 @@ class SmartKiosk(QMainWindow):
 
         # An unscanned item was placed into the trolley (delta >= 5.0g)
         if delta >= 5.0:
-            self.handle_unscanned_item_placed(delta)
+            baseline_weight = max(0.0, total_weight - delta)
+            self.handle_unscanned_item_placed(delta, baseline_weight)
 
-    def handle_unscanned_item_placed(self, added_weight):
+    def handle_unscanned_item_placed(self, added_weight, baseline_weight=0.0):
         """Show warning popup when an item is placed into the trolley without scanning first."""
         if (getattr(self, 'verification_in_progress', False) or 
             getattr(self, 'payment_in_progress', False) or 
@@ -376,9 +377,8 @@ class SmartKiosk(QMainWindow):
             return
 
         self._unscanned_overlay_active = True
-        self.unscanned_items_weights.append(added_weight)
         try:
-            dlg = UnscannedItemOverlay(self, added_weight, auto_close_secs=6)
+            dlg = UnscannedItemOverlay(self, self.scale_worker, added_weight, baseline_weight)
             dlg.exec_()
         finally:
             self._unscanned_overlay_active = False

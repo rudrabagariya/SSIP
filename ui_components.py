@@ -4,9 +4,10 @@ Uses Qt Virtual Keyboard for touch-friendly input
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-    QLineEdit, QDialog, QSizePolicy, QFrame, QGraphicsDropShadowEffect
+    QLineEdit, QDialog, QSizePolicy, QFrame, QGraphicsDropShadowEffect,
+    QProgressBar
 )
-from PySide6.QtCore import Qt, Signal, QEventLoop, QSize, QRect, QPoint
+from PySide6.QtCore import Qt, Signal, QEventLoop, QSize, QRect, QPoint, QTimer
 from PySide6.QtGui import QColor, QPalette, QBrush
 
 class OverlayDialog(QWidget):
@@ -205,3 +206,231 @@ class TouchInputDialog(OverlayDialog):
     def get_text(self):
         """Get the entered text"""
         return self.result_text
+
+
+class ScaleTareOverlay(OverlayDialog):
+    """
+    Animated fullscreen/modal overlay shown on startup or manual tare.
+    Displays tare progress, instructions to leave platform empty, and offset confirmation.
+    """
+    def __init__(self, parent, scale_worker):
+        super().__init__(parent)
+        self.scale_worker = scale_worker
+        self.content_container.setFixedWidth(520)
+
+        # Icon / Header
+        icon_label = QLabel("⚖️")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("font-size: 48px; margin-bottom: 5px;")
+        self.content_layout.addWidget(icon_label)
+
+        title_label = QLabel("Zeroing Weighing Scale")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b;")
+        self.content_layout.addWidget(title_label)
+
+        sub_label = QLabel("Please ensure the scale platform is empty and untouched.")
+        sub_label.setAlignment(Qt.AlignCenter)
+        sub_label.setWordWrap(True)
+        sub_label.setStyleSheet("font-size: 14px; color: #64748b; margin-bottom: 15px;")
+        self.content_layout.addWidget(sub_label)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #e2e8f0;
+                border-radius: 10px;
+                text-align: center;
+                height: 28px;
+                font-weight: bold;
+                font-size: 13px;
+                color: #1e293b;
+                background-color: #f8fafc;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #10b981);
+                border-radius: 8px;
+            }
+        """)
+        self.content_layout.addWidget(self.progress_bar)
+
+        # Status message
+        self.status_label = QLabel("Initializing sensor...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 14px; color: #475569; font-weight: 600; margin-top: 10px;")
+        self.content_layout.addWidget(self.status_label)
+
+        # Connect scale worker signals
+        if self.scale_worker:
+            self.scale_worker.sig_tare_progress.connect(self.on_progress)
+            self.scale_worker.sig_tare_completed.connect(self.on_completed)
+
+    def on_progress(self, pct, status):
+        self.progress_bar.setValue(pct)
+        self.status_label.setText(status)
+
+    def on_completed(self, success, msg, offset):
+        self.progress_bar.setValue(100)
+        if success:
+            self.status_label.setText(f"✅ {msg}")
+            self.status_label.setStyleSheet("font-size: 14px; color: #16a34a; font-weight: 700; margin-top: 10px;")
+            QTimer.singleShot(1200, self.accept)
+        else:
+            self.status_label.setText(f"⚠️ {msg}")
+            self.status_label.setStyleSheet("font-size: 14px; color: #dc2626; font-weight: 700; margin-top: 10px;")
+            QTimer.singleShot(2000, self.reject)
+
+
+class ItemWeightVerificationOverlay(OverlayDialog):
+    """
+    Active item-by-item verification dialog.
+    Triggered when an item with weight_grams > 0 is scanned.
+    Waits for the user to place the item on the scale platform,
+    tracks the weight delta, and validates against expected weight.
+    """
+    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0):
+        super().__init__(parent)
+        self.scale_worker = scale_worker
+        self.product_name = product_name
+        self.expected_weight = float(expected_weight)
+        self.tolerance_pct = tolerance_pct
+        self.tolerance_g = tolerance_g
+
+        # Compute acceptable bounds
+        tol = max(self.tolerance_g, self.expected_weight * (self.tolerance_pct / 100.0))
+        self.min_weight = max(1.0, self.expected_weight - tol)
+        self.max_weight = self.expected_weight + tol
+
+        self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
+        self.verified = False
+        self.content_container.setFixedWidth(540)
+
+        # Title
+        title_label = QLabel("📦 Place Item on Scale")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b; margin-bottom: 4px;")
+        self.content_layout.addWidget(title_label)
+
+        # Product Name & Expected Weight Box
+        prod_box = QFrame()
+        prod_box.setStyleSheet("background-color: #f1f5f9; border-radius: 12px; padding: 12px;")
+        pb_layout = QVBoxLayout(prod_box)
+        pb_layout.setContentsMargins(12, 10, 12, 10)
+        
+        p_name = QLabel(self.product_name)
+        p_name.setAlignment(Qt.AlignCenter)
+        p_name.setStyleSheet("font-size: 18px; font-weight: 700; color: #0f172a;")
+        p_name.setWordWrap(True)
+        pb_layout.addWidget(p_name)
+
+        target_info = QLabel(f"Expected: {self.expected_weight:.1f} g  (Allowed: {self.min_weight:.0f}g – {self.max_weight:.0f}g)")
+        target_info.setAlignment(Qt.AlignCenter)
+        target_info.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 600; margin-top: 4px;")
+        pb_layout.addWidget(target_info)
+        self.content_layout.addWidget(prod_box)
+
+        # Live Reading Box
+        self.reading_box = QFrame()
+        self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 12px;")
+        rb_layout = QVBoxLayout(self.reading_box)
+        
+        self.live_diff_label = QLabel("Waiting for item...")
+        self.live_diff_label.setAlignment(Qt.AlignCenter)
+        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
+        rb_layout.addWidget(self.live_diff_label)
+
+        self.live_status_label = QLabel("Place the item on the scale platform to verify")
+        self.live_status_label.setAlignment(Qt.AlignCenter)
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
+        rb_layout.addWidget(self.live_status_label)
+        self.content_layout.addWidget(self.reading_box)
+
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumHeight(46)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f1f5f9;
+                color: #64748b;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #e2e8f0; }
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+
+        self.skip_btn = QPushButton("Skip / Admin")
+        self.skip_btn.setMinimumHeight(46)
+        self.skip_btn.setCursor(Qt.PointingHandCursor)
+        self.skip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f8fafc;
+                color: #0284c7;
+                border: 1px solid #bae6fd;
+                border-radius: 8px;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #f0f9ff; }
+        """)
+        self.skip_btn.clicked.connect(self.on_skip)
+        btn_layout.addWidget(self.skip_btn)
+        self.content_layout.addLayout(btn_layout)
+
+        # Connect live scale signal
+        if self.scale_worker:
+            self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
+
+    def on_weight_update(self, current_weight, is_stable):
+        if self.verified:
+            return
+
+        diff = current_weight - self.initial_weight
+
+        if diff <= 2.0:
+            self.live_diff_label.setText("Waiting for item...")
+            self.live_status_label.setText("Place the item on the scale platform")
+            self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
+            return
+
+        # An item has been placed
+        self.live_diff_label.setText(f"+{diff:.1f} g")
+
+        if self.min_weight <= diff <= self.max_weight:
+            if is_stable:
+                self.verified = True
+                self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
+                self.live_status_label.setText("Weight matched! Adding to cart...")
+                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+                QTimer.singleShot(800, self.accept)
+            else:
+                self.live_status_label.setText("Stabilizing reading...")
+                self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #854d0e;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #ca8a04;")
+        else:
+            if is_stable:
+                if diff < self.min_weight:
+                    self.live_status_label.setText(f"⚠️ Underweight (+{diff:.1f}g vs {self.expected_weight:.0f}g)")
+                else:
+                    self.live_status_label.setText(f"⚠️ Overweight (+{diff:.1f}g vs {self.expected_weight:.0f}g)")
+                self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+
+    def on_skip(self):
+        # Allow staff or customer override
+        self.accept()

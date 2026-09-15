@@ -37,6 +37,7 @@ from utils import *
 from ui_components import *
 from flask_server import client
 from thermal_printer import ThermalPrinter, ESCPOS_AVAILABLE
+from scale_service import ScaleWorker
 
 # Check if serial is available
 try:
@@ -179,6 +180,19 @@ class SmartKiosk(QMainWindow):
         if SERIAL_AVAILABLE and SERIAL_PORT:
             threading.Thread(target=self.serial_scanner_thread, daemon=True).start()
 
+        # Initialize scale worker
+        self.scale_worker = None
+        if SCALE_ENABLED:
+            try:
+                self.scale_worker = ScaleWorker(self)
+                self.scale_worker.sig_weight_updated.connect(self.on_scale_weight_updated)
+                self.scale_worker.start()
+                # Run startup tare dialog once UI is rendered
+                QTimer.singleShot(700, self.start_startup_tare)
+            except Exception as e:
+                print(f"[UI] Warning: Could not initialize ScaleWorker: {e}")
+                self.scale_worker = None
+
         # Keyboard visibility handling
         self.original_margins = None
         self.active_dialog_moved = None
@@ -289,6 +303,24 @@ class SmartKiosk(QMainWindow):
                     self.active_dialog_moved = (window, window.pos())
                     new_y = window.y() - overlap
                     window.move(window.x(), new_y)
+
+    def start_startup_tare(self):
+        """Display tare animation overlay and trigger zero tare on scale worker."""
+        if not self.scale_worker:
+            return
+        overlay = ScaleTareOverlay(self, self.scale_worker)
+        self.scale_worker.request_tare()
+        overlay.exec_()
+
+    def on_scale_weight_updated(self, live_weight, is_stable):
+        """Update live scale weight indicator on the cart screen."""
+        if hasattr(self, 'cart_weight_label'):
+            expected_total = sum(item.get('weight_grams', 0.0) * item.get('qty', 1) for item in self.cart)
+            dot = "🟢" if is_stable else "🟡"
+            if expected_total > 0:
+                self.cart_weight_label.setText(f"⚖️ Scale: {live_weight:.1f}g  {dot}  (Exp: {expected_total:.1f}g)")
+            else:
+                self.cart_weight_label.setText(f"⚖️ Scale: {live_weight:.1f}g  {dot}")
 
     def setup_ui(self):
         self.central = QWidget()
@@ -551,7 +583,21 @@ class SmartKiosk(QMainWindow):
         self.clear_btn.setMinimumHeight(self.dp(44))
         self.clear_btn.setCursor(Qt.PointingHandCursor)
         cart_actions.addWidget(self.clear_btn)
+
+        self.zero_scale_btn = QPushButton("⚖️ Zero Scale")
+        self.zero_scale_btn.setObjectName("zeroScaleBtn")
+        self.zero_scale_btn.clicked.connect(self.start_startup_tare)
+        self.zero_scale_btn.setMinimumHeight(self.dp(44))
+        self.zero_scale_btn.setCursor(Qt.PointingHandCursor)
+        cart_actions.addWidget(self.zero_scale_btn)
+
         cart_actions.addStretch()
+
+        self.cart_weight_label = QLabel("⚖️ Scale: 0.0g  🟢")
+        self.cart_weight_label.setObjectName("cartWeightLabel")
+        self.cart_weight_label.setStyleSheet(f"font-size: {self.fs_px(15)}px; font-weight: 700; color: #0284c7; padding-right: 12px;")
+        cart_actions.addWidget(self.cart_weight_label)
+
         self.total_label = QLabel("Total: ₹0.00")
         self.total_label.setObjectName("totalLabel")
         cart_actions.addWidget(self.total_label)
@@ -1672,6 +1718,19 @@ class SmartKiosk(QMainWindow):
         msg.setAlignment(Qt.AlignCenter)
         msg.setStyleSheet("font-size: 18px; color: #333;")
         layout.addWidget(msg)
+
+        # Check scale weight vs expected cart weight
+        expected_total = sum(item.get("weight_grams", 0.0) * item.get("qty", 1) for item in self.cart)
+        if self.scale_worker and expected_total > 0:
+            current_scale = self.scale_worker.get_current_weight()
+            diff = abs(current_scale - expected_total)
+            tolerance = max(SCALE_WEIGHT_TOLERANCE_GRAMS * len(self.cart), expected_total * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
+            if diff > tolerance:
+                weight_warn = QLabel(f"⚠️ Cart Weight Discrepancy:\nScale reads {current_scale:.1f}g (Expected ~{expected_total:.1f}g).\nPlease verify items in the bagging area.")
+                weight_warn.setWordWrap(True)
+                weight_warn.setAlignment(Qt.AlignCenter)
+                weight_warn.setStyleSheet("font-size: 14px; color: #b91c1c; background-color: #fef2f2; padding: 10px; border-radius: 8px; border: 1px solid #fca5a5; font-weight: 600;")
+                layout.addWidget(weight_warn)
         
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(15)
@@ -2169,7 +2228,22 @@ class SmartKiosk(QMainWindow):
             if not row:
                 self.show_message("Product not found", f"No product for barcode: {barcode}", "warning")
                 return
-            
+
+            weight_grams = float(row["weight_grams"] or 0.0) if "weight_grams" in row.keys() else 0.0
+
+            # Active item-by-item verification on scale
+            if self.scale_worker and weight_grams > 0:
+                dlg = ItemWeightVerificationOverlay(
+                    self, 
+                    self.scale_worker, 
+                    row["name"], 
+                    weight_grams * qty,
+                    tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                    tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                )
+                if dlg.exec_() != QDialog.Accepted:
+                    return
+
             # Check if the product is already in the cart
             for item in self.cart:
                 if item["barcode"] == barcode:
@@ -2184,7 +2258,8 @@ class SmartKiosk(QMainWindow):
                 "price": float(row["price"]), 
                 "qty": qty,
                 "gst_percent": float(row["gst_percent"]),
-                "hsn_code": row["hsn_code"]
+                "hsn_code": row["hsn_code"],
+                "weight_grams": weight_grams
             })
             self.refresh_cart_display()
 
@@ -2229,6 +2304,15 @@ class SmartKiosk(QMainWindow):
         has_items = len(self.cart) > 0
         self.pay_btn.setEnabled(has_items)
 
+        # Update live scale weight indicator
+        if hasattr(self, 'cart_weight_label') and self.scale_worker:
+            live_w = self.scale_worker.get_current_weight()
+            expected_total = sum(item.get("weight_grams", 0.0) * item.get("qty", 1) for item in self.cart)
+            if expected_total > 0:
+                self.cart_weight_label.setText(f"⚖️ Scale: {live_w:.1f}g  (Exp: {expected_total:.1f}g)")
+            else:
+                self.cart_weight_label.setText(f"⚖️ Scale: {live_w:.1f}g")
+
     def create_quantity_widget(self, row, qty):
         # Outer wrapper to center content vertically
         wrapper = QWidget()
@@ -2271,8 +2355,20 @@ class SmartKiosk(QMainWindow):
 
     def change_quantity(self, row, delta):
         if 0 <= row < len(self.cart):
-            self.cart[row]["qty"] += delta
-            if self.cart[row]["qty"] <= 0:
+            item = self.cart[row]
+            if delta > 0 and self.scale_worker and item.get("weight_grams", 0) > 0:
+                dlg = ItemWeightVerificationOverlay(
+                    self,
+                    self.scale_worker,
+                    item["name"],
+                    item["weight_grams"],
+                    tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
+                    tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                )
+                if dlg.exec_() != QDialog.Accepted:
+                    return
+            item["qty"] += delta
+            if item["qty"] <= 0:
                 self.remove_item(row)
             else:
                 self.refresh_cart_display()
@@ -3536,6 +3632,8 @@ class SmartKiosk(QMainWindow):
     
     def closeEvent(self, event):
         print("Application closing. Exiting.")
+        if hasattr(self, 'scale_worker') and self.scale_worker:
+            self.scale_worker.stop()
         # Disconnect thermal printer
         if hasattr(self, 'thermal_printer') and self.thermal_printer:
             self.thermal_printer.disconnect()

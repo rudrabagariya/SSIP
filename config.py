@@ -87,3 +87,16 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "kiosk_db.sqlite3")
 # In-memory storage
 ORDER_CACHE = {}
 PENDING_RECEIPTS = {}
+
+# Scale / Load Cell Configuration
+SCALE_ENABLED = os.getenv("SCALE_ENABLED", "true").lower() == "true"
+SCALE_DOUT_PIN = int(os.getenv("SCALE_DOUT_PIN", "5"))
+SCALE_SCK_PIN = int(os.getenv("SCALE_SCK_PIN", "6"))
+SCALE_CALIBRATION_FILE = os.getenv(
+    "SCALE_CALIBRATION_FILE",
+    os.path.join(os.path.dirname(__file__), "load_cell_test", "calibration.json")
+)
+SCALE_TARE_SAMPLES = int(os.getenv("SCALE_TARE_SAMPLES", "150"))
+SCALE_WEIGHT_TOLERANCE_GRAMS = float(os.getenv("SCALE_WEIGHT_TOLERANCE_GRAMS", "8.0"))
+SCALE_WEIGHT_TOLERANCE_PERCENT = float(os.getenv("SCALE_WEIGHT_TOLERANCE_PERCENT", "20.0"))
+SCALE_STABILITY_VARIANCE = float(os.getenv("SCALE_STABILITY_VARIANCE", "2.0"))

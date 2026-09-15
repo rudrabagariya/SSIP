@@ -16,6 +16,10 @@ env/
 # Hardware-specific calibration
 load_cell_test/calibration.json
 
+# SQLite Databases (Auto-created and synced from products.csv on launch)
+*.sqlite3
+*.db
+
 # Large Datasets and Training Images (Not needed on Pi)
 dataset/
 YOLO_26/All_Products_Flattened/

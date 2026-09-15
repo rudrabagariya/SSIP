@@ -1,0 +1,5 @@
+# Load Cell Test — Python Dependencies
+# Only RPi.GPIO is needed (pre-installed on Raspberry Pi OS)
+# Install with: pip3 install RPi.GPIO  (usually already available)
+
+RPi.GPIO>=0.7.0

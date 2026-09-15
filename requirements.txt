@@ -1,0 +1,28 @@
+# ===== Qt UI Framework =====
+PySide6>=6.5.0
+
+# ===== Web / API =====
+Flask>=2.3.2
+requests>=2.31.0
+razorpay>=1.4.2
+
+# ===== Environment & Config =====
+python-dotenv>=1.0.0
+certifi>=2023.7.22
+
+# ===== QR Code =====
+qrcode[pil]>=7.4.2
+Pillow>=10.0.0
+
+# ===== Serial / Hardware =====
+pyserial>=3.5
+
+# ===== Telegram Bot =====
+python-telegram-bot>=20.0
+
+# ===== Thermal Printer =====
+python-escpos>=3.0
+pyusb>=1.2.1
+
+# ===== Windows-only (uncomment on Windows) =====
+# pywin32>=306

@@ -1,0 +1,21 @@
+# Dataset Collection Pipeline Dependencies
+# Install with: pip install -r requirements_dataset.txt
+
+# Image search
+duckduckgo_search>=7.0.0
+
+# Async HTTP downloads
+httpx>=0.27.0
+
+# Image processing & validation
+Pillow>=10.0.0
+
+# Perceptual hashing for deduplication
+imagehash>=4.3.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# YOLO Training (install when ready to train)
+# ultralytics>=8.3.0
+# albumentations>=1.4.0

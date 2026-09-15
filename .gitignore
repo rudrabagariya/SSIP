@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+dataset_venv/
+env/
+.venv/
+
+# Environment Variables & Secrets
+.env
+
+# Hardware-specific calibration
+load_cell_test/calibration.json
+
+# Large Datasets and Training Images (Not needed on Pi)
+dataset/
+YOLO_26/All_Products_Flattened/
+YOLO_26/background/
+YOLO_26/background /
+YOLO_26/*.zip
+
+# Ensure YOLO trained weights are tracked
+!YOLO_26/best.pt
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp

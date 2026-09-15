@@ -708,13 +708,12 @@ class SmartKiosk(QMainWindow):
 
         # Cart actions
         cart_actions = QHBoxLayout()
-        # Clear btn was moved to admin panel
-        self.zero_scale_btn = QPushButton("🛒 Zero Trolley")
-        self.zero_scale_btn.setObjectName("zeroScaleBtn")
-        self.zero_scale_btn.clicked.connect(self.start_startup_tare)
-        self.zero_scale_btn.setMinimumHeight(self.dp(44))
-        self.zero_scale_btn.setCursor(Qt.PointingHandCursor)
-        cart_actions.addWidget(self.zero_scale_btn)
+        self.clear_btn = QPushButton("🗑 Clear Cart")
+        self.clear_btn.setObjectName("clearBtn")
+        self.clear_btn.clicked.connect(self.clear_cart)
+        self.clear_btn.setMinimumHeight(self.dp(44))
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        cart_actions.addWidget(self.clear_btn)
 
         cart_actions.addStretch()
 
@@ -890,14 +889,14 @@ class SmartKiosk(QMainWindow):
         header.addWidget(title)
         header.addStretch()
         
-        self.clear_btn = QPushButton("🗑 Clear Cart")
-        self.clear_btn.setStyleSheet("""
+        self.zero_scale_btn = QPushButton("⚖️ Calibrate")
+        self.zero_scale_btn.setStyleSheet("""
             QPushButton { background: #f59e0b; color: white; border: none; 
                           border-radius: 8px; padding: 8px 16px; font-weight: 600; }
             QPushButton:hover { background: #d97706; }
         """)
-        self.clear_btn.clicked.connect(self.clear_cart)
-        header.addWidget(self.clear_btn)
+        self.zero_scale_btn.clicked.connect(self.start_startup_tare)
+        header.addWidget(self.zero_scale_btn)
 
         # Exit app button
         self.admin_exit_btn = QPushButton("⏻ Exit App")

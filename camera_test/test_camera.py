@@ -13,16 +13,27 @@ except ImportError:
     sys.exit(1)
 
 def main():
-    model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "YOLO_26", "best.pt"))
+    # Check if ONNX or NCNN formats exist first (for speed), otherwise fallback to PyTorch
+    model_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "YOLO_26"))
+    ncnn_path = os.path.join(model_dir, "best_ncnn_model")
+    onnx_path = os.path.join(model_dir, "best.onnx")
+    pt_path = os.path.join(model_dir, "best.pt")
     
-    if not os.path.exists(model_path):
-        print(f"Error: Model not found at {model_path}")
-        print("Please ensure the YOLO_26 folder and best.pt exist.")
+    if os.path.exists(ncnn_path):
+        model_path = ncnn_path
+        print(f"Loading optimized NCNN Model from {model_path}...")
+    elif os.path.exists(onnx_path):
+        model_path = onnx_path
+        print(f"Loading optimized ONNX Model from {model_path}...")
+    elif os.path.exists(pt_path):
+        model_path = pt_path
+        print(f"Loading standard PyTorch Model from {model_path}...")
+    else:
+        print(f"Error: Model not found in {model_dir}")
         sys.exit(1)
         
-    print(f"Loading YOLO Model from {model_path}...")
-    model = YOLO(model_path)
-    print("Model loaded successfully!")
+    model = YOLO(model_path, task='detect')
+    print(f"Model loaded successfully! Format: {model_path.split('.')[-1]}")
 
     # Auto-detect camera source: Try Picamera2 first (Native libcamera on Bookworm)
     cap_picam = None
@@ -74,8 +85,8 @@ def main():
                 continue
 
         # Run YOLO inference
-        # imgsz=640 and verbose=False for performance
-        results = model.predict(source=frame, conf=0.55, imgsz=640, verbose=False)
+        # imgsz=320 for speed (was 640), conf=0.7 to reduce false positives (was 0.55)
+        results = model.predict(source=frame, conf=0.70, imgsz=320, verbose=False)
 
         # Plot bounding boxes on the frame
         annotated_frame = results[0].plot()

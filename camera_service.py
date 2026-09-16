@@ -32,7 +32,26 @@ class CameraWorker(QThread):
     def run(self):
         try:
             from ultralytics import YOLO
-            model = YOLO(self.model_path)
+            # Check if ONNX or NCNN formats exist first (for speed), otherwise fallback to PyTorch
+            model_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "YOLO_26"))
+            ncnn_path = os.path.join(model_dir, "best_ncnn_model")
+            onnx_path = os.path.join(model_dir, "best.onnx")
+            pt_path = os.path.join(model_dir, "best.pt")
+            
+            if os.path.exists(ncnn_path):
+                model_path = ncnn_path
+                print(f"Loading optimized NCNN Model from {model_path}...")
+            elif os.path.exists(onnx_path):
+                model_path = onnx_path
+                print(f"Loading optimized ONNX Model from {model_path}...")
+            elif os.path.exists(pt_path):
+                model_path = pt_path
+                print(f"Loading standard PyTorch Model from {model_path}...")
+            else:
+                self.sig_camera_error.emit(f"Model not found in {model_dir}")
+                return
+
+            self.model = YOLO(model_path, task='detect')
         except Exception as e:
             self.sig_camera_error.emit(f"Failed to load YOLO model: {e}")
             return
@@ -81,8 +100,8 @@ class CameraWorker(QThread):
                 h, w, _ = frame.shape
                 
                 try:
-                    # Run YOLO detection
-                    results = model.predict(source=frame, conf=self.conf_threshold, imgsz=640, verbose=False)
+                    # imgsz=320 for speed, conf=0.7 for reducing false positives
+                    results = self.model.predict(source=frame, conf=0.70, imgsz=320, verbose=False)
                     
                     best_conf = 0.0
                     best_name = ""

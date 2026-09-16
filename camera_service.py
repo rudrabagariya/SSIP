@@ -37,60 +37,44 @@ class CameraWorker(QThread):
             self.sig_camera_error.emit(f"Failed to load YOLO model: {e}")
             return
 
-        # Auto-detect camera source with advanced Raspberry Pi fallbacks
-        cap = None
+        # Auto-detect camera source: Try Picamera2 first (Native libcamera on Bookworm)
+        self.cap_picam = None
+        self.cap_cv2 = None
         
-        # 1. Try modern libcamera GStreamer pipeline
-        gstreamer_pipeline = "libcamerasrc ! video/x-raw, width=640, height=480, framerate=30 ! videoconvert ! appsink"
-        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if not ret:
-                cap.release()
-                cap = None
-        else:
-            cap = None
+        try:
+            from picamera2 import Picamera2
+            self.cap_picam = Picamera2()
+            config = self.cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (640, 480)})
+            self.cap_picam.configure(config)
+            self.cap_picam.start()
+        except Exception:
+            self.cap_picam = None
 
-        # 2. Try standard indices
-        if cap is None or not cap.isOpened():
-            for i in range(11):
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    try:
-                        ret, _ = cap.read()
-                        if ret:
-                            break
-                    except Exception:
-                        pass
-                    cap.release()
-                cap = None
-
-        # 3. Try V4L2 specific backend
-        if cap is None or not cap.isOpened():
-            for i in range(11):
-                cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-                if cap.isOpened():
-                    try:
-                        ret, _ = cap.read()
-                        if ret:
-                            break
-                    except Exception:
-                        pass
-                    cap.release()
-                cap = None
-                        
-        if cap is None or not cap.isOpened():
-            self.sig_camera_error.emit("Cannot open any camera device. Check libcamera or V4L2 drivers.")
-            return
+        if self.cap_picam is None:
+            self.cap_cv2 = cv2.VideoCapture(0)
+            if not self.cap_cv2.isOpened():
+                self.sig_camera_error.emit("Cannot open any camera device. Check libcamera or V4L2 drivers.")
+                return
 
         history_len = 5
         history_buffer = deque(maxlen=history_len)
 
         while self._is_running and not self.isInterruptionRequested():
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.1)
-                continue
+            if self.cap_picam:
+                try:
+                    frame_bgra = self.cap_picam.capture_array()
+                    if frame_bgra is None:
+                        continue
+                    frame = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+                    ret = True
+                except Exception:
+                    time.sleep(0.1)
+                    continue
+            else:
+                ret, frame = self.cap_cv2.read()
+                if not ret:
+                    time.sleep(0.1)
+                    continue
 
             if self._analyze_requested:
                 self._analyze_requested = False
@@ -134,4 +118,7 @@ class CameraWorker(QThread):
             # Sleep slightly to prevent maxing out a CPU core when idling
             time.sleep(0.03)
 
-        cap.release()
+        if self.cap_picam:
+            self.cap_picam.stop()
+        if self.cap_cv2:
+            self.cap_cv2.release()

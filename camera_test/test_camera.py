@@ -24,58 +24,29 @@ def main():
     model = YOLO(model_path)
     print("Model loaded successfully!")
 
-    # Auto-detect camera source with advanced Raspberry Pi fallbacks
-    print("Scanning for available camera sources (including libcamera and V4L2)...")
+    # Auto-detect camera source: Try Picamera2 first (Native libcamera on Bookworm)
+    cap_picam = None
+    cap_cv2 = None
     
-    # 1. Try modern libcamera GStreamer pipeline
-    gstreamer_pipeline = "libcamerasrc ! video/x-raw, width=640, height=480, framerate=30 ! videoconvert ! appsink"
-    cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
-    if cap.isOpened():
-        ret, _ = cap.read()
-        if ret:
-            print("Connected using native libcamera GStreamer pipeline!")
-        else:
-            cap.release()
-            cap = None
-    else:
-        cap = None
+    try:
+        from picamera2 import Picamera2
+        print("Initializing Picamera2...")
+        cap_picam = Picamera2()
+        config = cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (640, 480)})
+        cap_picam.configure(config)
+        cap_picam.start()
+        print("Connected using native Picamera2!")
+    except Exception as e:
+        print(f"Picamera2 failed or not installed: {e}")
+        cap_picam = None
 
-    # 2. Try standard indices
-    if cap is None or not cap.isOpened():
-        for i in range(11):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                try:
-                    ret, _ = cap.read()
-                    if ret:
-                        print(f"Connected using standard VideoCapture index {i}!")
-                        break
-                except Exception as e:
-                    print(f"Index {i} failed on read: {e}")
-                cap.release()
-            cap = None
-
-    # 3. Try V4L2 specific backend
-    if cap is None or not cap.isOpened():
-        for i in range(11):
-            cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-            if cap.isOpened():
-                try:
-                    ret, _ = cap.read()
-                    if ret:
-                        print(f"Connected using V4L2 backend on index {i}!")
-                        break
-                except Exception as e:
-                    print(f"V4L2 Index {i} failed on read: {e}")
-                cap.release()
-            cap = None
-            
-    if cap is None or not cap.isOpened():
-        print("Error: Could not detect any working video devices.")
-        print("1. Did you run the script with: libcamerify python3 test_camera.py ?")
-        print("2. Try running: sudo modprobe bcm2835-v4l2")
-        print("3. Ensure camera permissions exist: sudo usermod -a -G video $USER")
-        sys.exit(1)
+    if cap_picam is None:
+        print("Falling back to standard OpenCV VideoCapture(0)...")
+        cap_cv2 = cv2.VideoCapture(0)
+        if not cap_cv2.isOpened():
+            print("Error: Could not detect any working video devices.")
+            sys.exit(1)
+        print("Connected using standard VideoCapture!")
 
     print("Camera initialized! Press 'q' to quit.")
     
@@ -84,11 +55,23 @@ def main():
     fps_display = 0.0
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame. Retrying...")
-            time.sleep(0.5)
-            continue
+        if cap_picam:
+            try:
+                frame_bgra = cap_picam.capture_array()
+                if frame_bgra is None:
+                    continue
+                frame = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+                ret = True
+            except Exception as e:
+                print(f"Failed to grab Picamera2 frame: {e}")
+                time.sleep(0.5)
+                continue
+        else:
+            ret, frame = cap_cv2.read()
+            if not ret:
+                print("Failed to grab frame. Retrying...")
+                time.sleep(0.5)
+                continue
 
         # Run YOLO inference
         # imgsz=640 and verbose=False for performance
@@ -120,7 +103,10 @@ def main():
             break
 
     # Clean up
-    cap.release()
+    if cap_picam:
+        cap_picam.stop()
+    if cap_cv2:
+        cap_cv2.release()
     cv2.destroyAllWindows()
     print("Camera closed.")
 

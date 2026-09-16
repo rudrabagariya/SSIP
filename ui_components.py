@@ -795,9 +795,23 @@ class UnscannedItemOverlay(OverlayDialog):
                 pass
 
     def on_override(self):
-        self._disconnect_scale()
-        self.accept()
-
+        from config import ADMIN_PASSWORD
+        dialog = TouchInputDialog(
+            self,
+            "Admin Override",
+            "Enter admin password:",
+            is_password=True
+        )
+        if dialog.exec_() == QDialog.Accepted:
+            if dialog.get_text() == ADMIN_PASSWORD:
+                self._disconnect_scale()
+                self.accept()
+            else:
+                if hasattr(self.parent(), 'show_message'):
+                    self.parent().show_message("Invalid Password", "Incorrect admin password.", "warning")
+                else:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "Invalid Password", "Incorrect admin password.")
     def accept(self):
         self._disconnect_scale()
         super().accept()

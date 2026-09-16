@@ -2356,6 +2356,10 @@ class SmartKiosk(QMainWindow):
             self.show_message("Action Blocked", "You cannot modify the cart during checkout.", "warning")
             return
             
+        if getattr(self, '_unscanned_overlay_active', False):
+            self.show_message("Action Blocked", "Please remove the unscanned item first.", "warning")
+            return
+            
         # Fetch all required product details from the database
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row

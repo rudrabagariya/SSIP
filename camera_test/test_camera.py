@@ -85,8 +85,8 @@ def main():
                 continue
 
         # Run YOLO inference
-        # imgsz=320 for speed (was 640), conf=0.7 to reduce false positives (was 0.55)
-        results = model.predict(source=frame, conf=0.70, imgsz=320, verbose=False)
+        # imgsz=640 for accuracy, conf=0.7 to reduce false positives
+        results = model.predict(source=frame, conf=0.70, imgsz=640, verbose=False)
 
         # Plot bounding boxes on the frame
         annotated_frame = results[0].plot()

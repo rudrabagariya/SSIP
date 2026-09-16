@@ -100,8 +100,8 @@ class CameraWorker(QThread):
                 h, w, _ = frame.shape
                 
                 try:
-                    # imgsz=320 for speed, conf=0.7 for reducing false positives
-                    results = self.model.predict(source=frame, conf=0.70, imgsz=320, verbose=False)
+                    # imgsz=640 for accuracy, conf=0.7 for reducing false positives
+                    results = self.model.predict(source=frame, conf=0.70, imgsz=640, verbose=False)
                     
                     best_conf = 0.0
                     best_name = ""

@@ -2437,9 +2437,12 @@ class SmartKiosk(QMainWindow):
             barcode = item["barcode"]
             prod_item = QTableWidgetItem(name_text)
             
-            img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
-            if os.path.exists(img_path):
-                prod_item.setIcon(QIcon(img_path))
+            # Check for both .jpg and .png image formats
+            img_base_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}")
+            if os.path.exists(f"{img_base_path}.jpg"):
+                prod_item.setIcon(QIcon(f"{img_base_path}.jpg"))
+            elif os.path.exists(f"{img_base_path}.png"):
+                prod_item.setIcon(QIcon(f"{img_base_path}.png"))
                 
             self.cart_table.setItem(row, 0, prod_item)
             price_item = QTableWidgetItem(self.fmt_amount(item['price']))

@@ -24,34 +24,51 @@ def main():
     model = YOLO(model_path)
     print("Model loaded successfully!")
 
-    # Auto-detect camera source
-    print("Scanning for available camera sources (indices 0 to 10)...")
-    working_index = None
-    available_indices = []
+    # Auto-detect camera source with advanced Raspberry Pi fallbacks
+    print("Scanning for available camera sources (including libcamera and V4L2)...")
     
-    for i in range(11):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                available_indices.append(i)
+    # 1. Try modern libcamera GStreamer pipeline
+    gstreamer_pipeline = "libcamerasrc ! video/x-raw, width=640, height=480, framerate=30 ! videoconvert ! appsink"
+    cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+    if cap.isOpened():
+        ret, _ = cap.read()
+        if ret:
+            print("Connected using native libcamera GStreamer pipeline!")
+        else:
             cap.release()
+            cap = None
+    else:
+        cap = None
+
+    # 2. Try standard indices
+    if cap is None or not cap.isOpened():
+        for i in range(11):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    print(f"Connected using standard VideoCapture index {i}!")
+                    break
+                cap.release()
+            cap = None
+
+    # 3. Try V4L2 specific backend
+    if cap is None or not cap.isOpened():
+        for i in range(11):
+            cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    print(f"Connected using V4L2 backend on index {i}!")
+                    break
+                cap.release()
+            cap = None
             
-    if not available_indices:
+    if cap is None or not cap.isOpened():
         print("Error: Could not detect any working video devices.")
-        print("1. If using Raspberry Pi Camera Module, run using 'libcamerify python3 test_camera.py'")
-        print("2. Check if the camera ribbon cable is firmly connected.")
-        print("3. Ensure 'Legacy Camera' or 'V4L2' driver is enabled in raspi-config.")
-        sys.exit(1)
-        
-    print(f"Detected working camera indices: {available_indices}")
-    working_index = available_indices[0]
-    print(f"Connecting to Camera Index: {working_index}")
-    
-    cap = cv2.VideoCapture(working_index)
-    
-    if not cap.isOpened():
-        print("Error: Could not open the selected video device.")
+        print("1. Did you run the script with: libcamerify python3 test_camera.py ?")
+        print("2. Try running: sudo modprobe bcm2835-v4l2")
+        print("3. Ensure camera permissions exist: sudo usermod -a -G video $USER")
         sys.exit(1)
 
     print("Camera initialized! Press 'q' to quit.")

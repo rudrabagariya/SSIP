@@ -37,22 +37,44 @@ class CameraWorker(QThread):
             self.sig_camera_error.emit(f"Failed to load YOLO model: {e}")
             return
 
-        # Auto-detect camera source
-        working_index = self.camera_index
-        if working_index == 0:  # Default
+        # Auto-detect camera source with advanced Raspberry Pi fallbacks
+        cap = None
+        
+        # 1. Try modern libcamera GStreamer pipeline
+        gstreamer_pipeline = "libcamerasrc ! video/x-raw, width=640, height=480, framerate=30 ! videoconvert ! appsink"
+        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if not ret:
+                cap.release()
+                cap = None
+        else:
+            cap = None
+
+        # 2. Try standard indices
+        if cap is None or not cap.isOpened():
             for i in range(11):
-                cap_test = cv2.VideoCapture(i)
-                if cap_test.isOpened():
-                    ret, _ = cap_test.read()
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    ret, _ = cap.read()
                     if ret:
-                        working_index = i
-                        cap_test.release()
                         break
-                    cap_test.release()
+                    cap.release()
+                cap = None
+
+        # 3. Try V4L2 specific backend
+        if cap is None or not cap.isOpened():
+            for i in range(11):
+                cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        break
+                    cap.release()
+                cap = None
                         
-        cap = cv2.VideoCapture(working_index)
-        if not cap.isOpened():
-            self.sig_camera_error.emit(f"Cannot open any camera device. Tried up to index {working_index}.")
+        if cap is None or not cap.isOpened():
+            self.sig_camera_error.emit("Cannot open any camera device. Check libcamera or V4L2 drivers.")
             return
 
         history_len = 5

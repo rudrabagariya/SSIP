@@ -616,9 +616,10 @@ class UnscannedItemOverlay(OverlayDialog):
     DOES NOT dismiss automatically. It remains on screen blocking the UI until
     the user physically removes the unscanned item from the trolley.
     """
-    def __init__(self, parent, scale_worker, added_weight, baseline_weight=0.0):
+    def __init__(self, parent, scale_worker, added_weight, baseline_weight=0.0, camera_worker=None):
         super().__init__(parent)
         self.scale_worker = scale_worker
+        self.camera_worker = camera_worker
         self.added_weight = added_weight
         self.baseline_weight = max(0.0, baseline_weight)
         self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else (self.baseline_weight + added_weight)
@@ -652,11 +653,17 @@ class UnscannedItemOverlay(OverlayDialog):
         wb_layout.setContentsMargins(16, 12, 16, 12)
         wb_layout.setSpacing(6)
 
-        self.msg_label = QLabel("Please first scan the item before putting onto the trolley.")
+        self.msg_label = QLabel("Analyzing item...")
         self.msg_label.setAlignment(Qt.AlignCenter)
         self.msg_label.setWordWrap(True)
         self.msg_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #991b1b;")
         wb_layout.addWidget(self.msg_label)
+
+        if self.camera_worker:
+            self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+            self.camera_worker.request_analysis()
+        else:
+            self.msg_label.setText("Please first scan the item before putting onto the trolley.")
 
         self.action_instruction = QLabel("⚠️ Please REMOVE this item from the trolley to continue.")
         self.action_instruction.setAlignment(Qt.AlignCenter)
@@ -793,6 +800,17 @@ class UnscannedItemOverlay(OverlayDialog):
                 self.scale_worker.sig_weight_updated.disconnect(self.on_scale_update)
             except Exception:
                 pass
+        if getattr(self, 'camera_worker', None):
+            try:
+                self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+            except Exception:
+                pass
+
+    def on_camera_detection(self, class_name, confidence):
+        if class_name != "Unknown" and confidence >= 0.5:
+            self.msg_label.setText(f"You placed <b>{class_name}</b> without scanning!<br>Please scan its barcode or remove it from the trolley.")
+        else:
+            self.msg_label.setText("Please first scan the item before putting onto the trolley.")
 
     def on_override(self):
         from config import ADMIN_PASSWORD

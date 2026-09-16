@@ -24,8 +24,8 @@ from PySide6.QtWidgets import (
     QToolButton, QSizePolicy, QTextEdit, QGraphicsDropShadowEffect, 
     QGraphicsOpacityEffect, QSpinBox, QScroller, QTabWidget
 )
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QEvent, QPropertyAnimation, QEasingCurve, QMutex, QRect, QPoint
-from PySide6.QtGui import QPixmap, QColor, QPalette, QImage, QKeyEvent
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QEvent, QPropertyAnimation, QEasingCurve, QMutex, QRect, QPoint, QSize
+from PySide6.QtGui import QPixmap, QColor, QPalette, QImage, QKeyEvent, QIcon
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
 
@@ -37,7 +37,9 @@ from utils import *
 from ui_components import *
 from flask_server import client
 from thermal_printer import ThermalPrinter, ESCPOS_AVAILABLE
+from thermal_printer import ThermalPrinter, ESCPOS_AVAILABLE
 from scale_service import ScaleWorker
+from camera_service import CameraWorker
 
 # Check if serial is available
 try:
@@ -199,6 +201,13 @@ class SmartKiosk(QMainWindow):
             except Exception as e:
                 print(f"[UI] Warning: Could not initialize ScaleWorker: {e}")
                 self.scale_worker = None
+
+        try:
+            self.camera_worker = CameraWorker()
+            self.camera_worker.start()
+        except Exception as e:
+            print(f"[UI] Warning: Could not initialize CameraWorker: {e}")
+            self.camera_worker = None
 
         # Keyboard visibility handling
         self.original_margins = None
@@ -401,7 +410,7 @@ class SmartKiosk(QMainWindow):
 
         self._unscanned_overlay_active = True
         try:
-            dlg = UnscannedItemOverlay(self, self.scale_worker, added_weight, baseline_weight)
+            dlg = UnscannedItemOverlay(self, self.scale_worker, added_weight, baseline_weight, getattr(self, 'camera_worker', None))
             dlg.exec_()
         finally:
             self._unscanned_overlay_active = False
@@ -692,7 +701,8 @@ class SmartKiosk(QMainWindow):
         except Exception:
             pass
         # Make rows tall enough so +/- controls are clearly visible
-        self.cart_table.verticalHeader().setDefaultSectionSize(self.dp(64))
+        self.cart_table.verticalHeader().setDefaultSectionSize(self.dp(80))
+        self.cart_table.setIconSize(QSize(self.dp(70), self.dp(70)))
         # Ensure Qty column is wide enough for +/- controls
         self.cart_table.setColumnWidth(2, self.dp(190))
         # Ensure Remove column is wide enough for the button (wider to prevent clipping)
@@ -2424,15 +2434,22 @@ class SmartKiosk(QMainWindow):
         for row, item in enumerate(self.cart):
             # Localize product name and price
             name_text = item["name"]
-            self.cart_table.setItem(row, 0, QTableWidgetItem(name_text))
+            barcode = item["barcode"]
+            prod_item = QTableWidgetItem(name_text)
+            
+            img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
+            if os.path.exists(img_path):
+                prod_item.setIcon(QIcon(img_path))
+                
+            self.cart_table.setItem(row, 0, prod_item)
             price_item = QTableWidgetItem(self.fmt_amount(item['price']))
             price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.cart_table.setItem(row, 1, price_item)
             
             qty_widget = self.create_quantity_widget(row, item["qty"])
             self.cart_table.setCellWidget(row, 2, qty_widget)
-            # Ensure row height accommodates +/- buttons
-            self.cart_table.setRowHeight(row, self.dp(64))
+            # Ensure row height accommodates +/- buttons and the product image
+            self.cart_table.setRowHeight(row, self.dp(80))
             
             line_total = item["price"] * item["qty"]
             total_item = QTableWidgetItem(self.fmt_amount(line_total))

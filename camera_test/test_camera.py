@@ -45,10 +45,13 @@ def main():
         for i in range(11):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    print(f"Connected using standard VideoCapture index {i}!")
-                    break
+                try:
+                    ret, _ = cap.read()
+                    if ret:
+                        print(f"Connected using standard VideoCapture index {i}!")
+                        break
+                except Exception as e:
+                    print(f"Index {i} failed on read: {e}")
                 cap.release()
             cap = None
 
@@ -57,10 +60,13 @@ def main():
         for i in range(11):
             cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
             if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    print(f"Connected using V4L2 backend on index {i}!")
-                    break
+                try:
+                    ret, _ = cap.read()
+                    if ret:
+                        print(f"Connected using V4L2 backend on index {i}!")
+                        break
+                except Exception as e:
+                    print(f"V4L2 Index {i} failed on read: {e}")
                 cap.release()
             cap = None
             

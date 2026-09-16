@@ -56,9 +56,12 @@ class CameraWorker(QThread):
             for i in range(11):
                 cap = cv2.VideoCapture(i)
                 if cap.isOpened():
-                    ret, _ = cap.read()
-                    if ret:
-                        break
+                    try:
+                        ret, _ = cap.read()
+                        if ret:
+                            break
+                    except Exception:
+                        pass
                     cap.release()
                 cap = None
 
@@ -67,9 +70,12 @@ class CameraWorker(QThread):
             for i in range(11):
                 cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
                 if cap.isOpened():
-                    ret, _ = cap.read()
-                    if ret:
-                        break
+                    try:
+                        ret, _ = cap.read()
+                        if ret:
+                            break
+                    except Exception:
+                        pass
                     cap.release()
                 cap = None
                         

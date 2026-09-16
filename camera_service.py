@@ -37,9 +37,22 @@ class CameraWorker(QThread):
             self.sig_camera_error.emit(f"Failed to load YOLO model: {e}")
             return
 
-        cap = cv2.VideoCapture(self.camera_index)
+        # Auto-detect camera source
+        working_index = self.camera_index
+        if working_index == 0:  # Default
+            for i in range(11):
+                cap_test = cv2.VideoCapture(i)
+                if cap_test.isOpened():
+                    ret, _ = cap_test.read()
+                    if ret:
+                        working_index = i
+                        cap_test.release()
+                        break
+                    cap_test.release()
+                        
+        cap = cv2.VideoCapture(working_index)
         if not cap.isOpened():
-            self.sig_camera_error.emit("Cannot open camera.")
+            self.sig_camera_error.emit(f"Cannot open any camera device. Tried up to index {working_index}.")
             return
 
         history_len = 5

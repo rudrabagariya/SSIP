@@ -24,13 +24,34 @@ def main():
     model = YOLO(model_path)
     print("Model loaded successfully!")
 
-    # Try opening the default camera (index 0)
-    print("Opening Camera (Index 0)...")
-    cap = cv2.VideoCapture(0)
+    # Auto-detect camera source
+    print("Scanning for available camera sources (indices 0 to 10)...")
+    working_index = None
+    available_indices = []
+    
+    for i in range(11):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                available_indices.append(i)
+            cap.release()
+            
+    if not available_indices:
+        print("Error: Could not detect any working video devices.")
+        print("1. If using Raspberry Pi Camera Module, run using 'libcamerify python3 test_camera.py'")
+        print("2. Check if the camera ribbon cable is firmly connected.")
+        print("3. Ensure 'Legacy Camera' or 'V4L2' driver is enabled in raspi-config.")
+        sys.exit(1)
+        
+    print(f"Detected working camera indices: {available_indices}")
+    working_index = available_indices[0]
+    print(f"Connecting to Camera Index: {working_index}")
+    
+    cap = cv2.VideoCapture(working_index)
     
     if not cap.isOpened():
-        print("Error: Could not open video device.")
-        print("If using Raspberry Pi Camera Module, you may need to use 'libcamerify python3 test_camera.py'")
+        print("Error: Could not open the selected video device.")
         sys.exit(1)
 
     print("Camera initialized! Press 'q' to quit.")

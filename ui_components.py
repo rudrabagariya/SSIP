@@ -1058,6 +1058,9 @@ class UnscannedItemOverlay(OverlayDialog):
             self.live_status_label.setText("⏳ Waiting for item to be removed...")
 
     def _disconnect_scale(self):
+        if not getattr(self, '_signals_connected', True):
+            return
+        self._signals_connected = False
         if self.scale_worker:
             try:
                 self.scale_worker.sig_weight_updated.disconnect(self.on_scale_update)

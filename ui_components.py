@@ -1438,25 +1438,6 @@ class UnscannedItemOverlay(OverlayDialog):
         self.msg_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #991b1b;")
         wb_layout.addWidget(self.msg_label)
 
-        self.countdown_bar = QProgressBar()
-        self.countdown_bar.setFixedHeight(18)
-        self.countdown_bar.setTextVisible(True)
-        self.countdown_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #fca5a5;
-                border-radius: 9px;
-                background-color: #fee2e2;
-                text-align: center;
-                font-weight: bold;
-                color: #991b1b;
-            }
-            QProgressBar::chunk {
-                background-color: #ef4444;
-                border-radius: 8px;
-            }
-        """)
-        wb_layout.addWidget(self.countdown_bar)
-
         self.images_widget = QWidget()
         self.images_layout = QHBoxLayout(self.images_widget)
         self.images_layout.setAlignment(Qt.AlignCenter)
@@ -1515,20 +1496,19 @@ class UnscannedItemOverlay(OverlayDialog):
                 if meta.get("yolo"):
                     self.cart_yolo_classes.add(meta["yolo"])
 
-        self.unscanned_items_found = set()
-        self.total_duration_secs = 10.0
-        self.start_time = time.time()
+        import collections
+        self.detection_history = collections.deque(maxlen=4)
+        self.last_unscanned_items = []
         self.visual_analyzing = True
 
         if self.camera_worker:
             self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
             self.visual_timer = QTimer(self)
             self.visual_timer.timeout.connect(self._poll_camera)
-            self.visual_timer.start(200)
+            self.visual_timer.start(400)
             self._poll_camera()
         else:
             self.visual_analyzing = False
-            self.countdown_bar.setVisible(False)
             self._update_images_ui()
 
         # Connect live scale signal
@@ -1564,34 +1544,38 @@ class UnscannedItemOverlay(OverlayDialog):
                 self.visual_timer.stop()
             return
             
-        elapsed = time.time() - self.start_time
-        remaining = max(0.0, self.total_duration_secs - elapsed)
-        pct = int((remaining / self.total_duration_secs) * 100)
-        self.countdown_bar.setValue(pct)
-        self.countdown_bar.setFormat(f"Analyzing trolley: {remaining:.1f}s")
-        
-        if remaining <= 0.0:
-            self.visual_analyzing = False
-            self.countdown_bar.setVisible(False)
-            if hasattr(self, 'visual_timer') and self.visual_timer:
-                self.visual_timer.stop()
-            self._update_images_ui()
-            return
-            
         self.camera_worker.request_analysis()
 
     def on_camera_detection(self, detected_items):
         if not self.visual_analyzing:
             return
             
-        added_new = False
+        possible_items = []
         for item in detected_items:
-            if item not in self.cart_yolo_classes:
-                if item not in self.unscanned_items_found:
-                    self.unscanned_items_found.add(item)
-                    added_new = True
-                    
-        if added_new:
+            if item in self.cart_yolo_classes:
+                continue
+            meta = resolve_product_info(item)
+            # Filter logically: if added weight is 24g, a 32g item is impossible.
+            # Allow up to 10g tolerance for scale fluctuations and multi-items.
+            if meta.get("weight", 0.0) <= self.added_weight + 10.0:
+                possible_items.append(item)
+                
+        self.detection_history.append(possible_items)
+        
+        # Debounce: Item must appear in at least 2 frames of the history
+        counts = {}
+        for frame_items in self.detection_history:
+            for item in set(frame_items):
+                counts[item] = counts.get(item, 0) + 1
+                
+        current_unscanned = [item for item, count in counts.items() if count >= 2]
+        current_unscanned.sort()
+        
+        if current_unscanned != self.last_unscanned_items:
+            self.last_unscanned_items = current_unscanned
+            self._update_images_ui()
+        elif not current_unscanned and not self.last_unscanned_items:
+            # Always update if empty to potentially refresh the live camera feed
             self._update_images_ui()
 
     def _update_images_ui(self):
@@ -1602,8 +1586,8 @@ class UnscannedItemOverlay(OverlayDialog):
             if widget:
                 widget.deleteLater()
                 
-        if not self.unscanned_items_found:
-            if self.visual_analyzing:
+        if not self.last_unscanned_items:
+            if self.visual_analyzing and len(self.detection_history) < 2:
                 self.msg_label.setText("Analyzing item...")
                 return
             else:
@@ -1629,7 +1613,7 @@ class UnscannedItemOverlay(OverlayDialog):
                 self.images_layout.addWidget(wrapper)
         else:
             names = []
-            for yolo_cls in self.unscanned_items_found:
+            for yolo_cls in self.last_unscanned_items:
                 meta = resolve_product_info(yolo_cls)
                 names.append(f"<b>{meta['name']}</b>")
                 
@@ -1706,7 +1690,6 @@ class UnscannedItemOverlay(OverlayDialog):
             self.live_status_label.setText("✅ Resuming... Scan barcode first.")
             self.live_status_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #15803d;")
             
-            self.countdown_bar.setVisible(False)
             self._disconnect_scale()
             if hasattr(self, 'visual_timer') and self.visual_timer:
                 self.visual_timer.stop()

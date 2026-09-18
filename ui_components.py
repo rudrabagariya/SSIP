@@ -1438,11 +1438,29 @@ class UnscannedItemOverlay(OverlayDialog):
         self.msg_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #991b1b;")
         wb_layout.addWidget(self.msg_label)
 
-        if self.camera_worker:
-            self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
-            self.camera_worker.request_analysis()
-        else:
-            self.msg_label.setText("Please first scan the item before putting onto the trolley.")
+        self.countdown_bar = QProgressBar()
+        self.countdown_bar.setFixedHeight(18)
+        self.countdown_bar.setTextVisible(True)
+        self.countdown_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #fca5a5;
+                border-radius: 9px;
+                background-color: #fee2e2;
+                text-align: center;
+                font-weight: bold;
+                color: #991b1b;
+            }
+            QProgressBar::chunk {
+                background-color: #ef4444;
+                border-radius: 8px;
+            }
+        """)
+        wb_layout.addWidget(self.countdown_bar)
+
+        self.images_widget = QWidget()
+        self.images_layout = QHBoxLayout(self.images_widget)
+        self.images_layout.setAlignment(Qt.AlignCenter)
+        wb_layout.addWidget(self.images_widget)
 
         self.action_instruction = QLabel("⚠️ Please REMOVE this item from the trolley to continue.")
         self.action_instruction.setAlignment(Qt.AlignCenter)
@@ -1489,11 +1507,157 @@ class UnscannedItemOverlay(OverlayDialog):
         sb_layout.addWidget(self.live_weight_label)
         self.content_layout.addWidget(self.status_box)
 
-        # Admin override button removed for security
+        # Determine cart yolo classes
+        self.cart_yolo_classes = set()
+        if hasattr(parent, 'cart'):
+            for item in parent.cart:
+                meta = resolve_product_info(item["product_name"])
+                if meta.get("yolo"):
+                    self.cart_yolo_classes.add(meta["yolo"])
+
+        self.unscanned_items_found = set()
+        self.total_duration_secs = 10.0
+        self.start_time = time.time()
+        self.visual_analyzing = True
+
+        if self.camera_worker:
+            self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+            self.visual_timer = QTimer(self)
+            self.visual_timer.timeout.connect(self._poll_camera)
+            self.visual_timer.start(200)
+            self._poll_camera()
+        else:
+            self.visual_analyzing = False
+            self.countdown_bar.setVisible(False)
+            self._update_images_ui()
 
         # Connect live scale signal
         if self.scale_worker:
             self.scale_worker.sig_weight_updated.connect(self.on_scale_update)
+
+    def _get_camera_pixmap(self, size=(94, 94)):
+        if not hasattr(self, 'camera_worker') or not self.camera_worker or not hasattr(self.camera_worker, 'last_frame'):
+            return None
+        frame = self.camera_worker.last_frame
+        if frame is None:
+            return None
+        try:
+            import cv2
+            from PySide6.QtGui import QImage, QPixmap
+            from PySide6.QtCore import Qt
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            min_dim = min(w, h)
+            start_x = (w - min_dim) // 2
+            start_y = (h - min_dim) // 2
+            cropped = q_img.copy(start_x, start_y, min_dim, min_dim)
+            return QPixmap.fromImage(cropped).scaled(size[0], size[1], Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        except Exception as e:
+            print(f"[UnscannedItem] Error getting camera pixmap: {e}")
+            return None
+
+    def _poll_camera(self):
+        if not self.visual_analyzing or not self.camera_worker:
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
+            return
+            
+        elapsed = time.time() - self.start_time
+        remaining = max(0.0, self.total_duration_secs - elapsed)
+        pct = int((remaining / self.total_duration_secs) * 100)
+        self.countdown_bar.setValue(pct)
+        self.countdown_bar.setFormat(f"Analyzing trolley: {remaining:.1f}s")
+        
+        if remaining <= 0.0:
+            self.visual_analyzing = False
+            self.countdown_bar.setVisible(False)
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
+            self._update_images_ui()
+            return
+            
+        self.camera_worker.request_analysis()
+
+    def on_camera_detection(self, detected_items):
+        if not self.visual_analyzing:
+            return
+            
+        added_new = False
+        for item in detected_items:
+            if item not in self.cart_yolo_classes:
+                if item not in self.unscanned_items_found:
+                    self.unscanned_items_found.add(item)
+                    added_new = True
+                    
+        if added_new:
+            self._update_images_ui()
+
+    def _update_images_ui(self):
+        # Clear existing layout
+        while self.images_layout.count():
+            item = self.images_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+                
+        if not self.unscanned_items_found:
+            if self.visual_analyzing:
+                self.msg_label.setText("Analyzing item...")
+                return
+            else:
+                self.msg_label.setText("Unidentified item placed without scanning!")
+                vbox = QVBoxLayout()
+                img_lbl = QLabel()
+                cam_pix = self._get_camera_pixmap()
+                if cam_pix:
+                    img_lbl.setPixmap(cam_pix)
+                else:
+                    img_lbl.setText("📷")
+                img_lbl.setAlignment(Qt.AlignCenter)
+                img_lbl.setStyleSheet("background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px; padding: 4px;")
+                vbox.addWidget(img_lbl)
+                
+                name_lbl = QLabel("Unidentified Item")
+                name_lbl.setAlignment(Qt.AlignCenter)
+                name_lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+                vbox.addWidget(name_lbl)
+                
+                wrapper = QWidget()
+                wrapper.setLayout(vbox)
+                self.images_layout.addWidget(wrapper)
+        else:
+            names = []
+            for yolo_cls in self.unscanned_items_found:
+                meta = resolve_product_info(yolo_cls)
+                names.append(f"<b>{meta['name']}</b>")
+                
+                vbox = QVBoxLayout()
+                img_lbl = QLabel()
+                pix = load_product_pixmap(meta.get("barcode"), size=(80, 80))
+                if not pix:
+                    pix = self._get_camera_pixmap((80, 80))
+                    
+                if pix:
+                    img_lbl.setPixmap(pix)
+                else:
+                    img_lbl.setText("📦")
+                img_lbl.setAlignment(Qt.AlignCenter)
+                img_lbl.setStyleSheet("background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px; padding: 4px;")
+                vbox.addWidget(img_lbl)
+                
+                name_lbl = QLabel(meta['name'])
+                name_lbl.setAlignment(Qt.AlignCenter)
+                name_lbl.setWordWrap(True)
+                name_lbl.setStyleSheet("font-size: 11px; font-weight: bold; max-width: 90px;")
+                vbox.addWidget(name_lbl)
+                
+                wrapper = QWidget()
+                wrapper.setLayout(vbox)
+                self.images_layout.addWidget(wrapper)
+                
+            self.msg_label.setText(f"You placed {', '.join(names)} without scanning!<br>Please scan or remove from trolley.")
 
     def on_scale_update(self, current_weight, is_stable):
         if self.item_removed:
@@ -1542,7 +1706,10 @@ class UnscannedItemOverlay(OverlayDialog):
             self.live_status_label.setText("✅ Resuming... Scan barcode first.")
             self.live_status_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #15803d;")
             
+            self.countdown_bar.setVisible(False)
             self._disconnect_scale()
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
             QTimer.singleShot(900, self.accept)
         else:
             self.live_status_label.setText("⏳ Waiting for item to be removed...")
@@ -1561,13 +1728,6 @@ class UnscannedItemOverlay(OverlayDialog):
                 self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
             except Exception:
                 pass
-
-    def on_camera_detection(self, detected_items):
-        if detected_items:
-            items_str = ", ".join(detected_items)
-            self.msg_label.setText(f"You placed <b>{items_str}</b> without scanning!<br>Please scan its barcode or remove it from the trolley.")
-        else:
-            self.msg_label.setText("Please first scan the item before putting onto the trolley.")
 
     def accept(self):
         self._disconnect_scale()

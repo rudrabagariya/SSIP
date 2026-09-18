@@ -3910,24 +3910,9 @@ class SmartKiosk(QMainWindow):
             self.stacked_widget.setCurrentWidget(self.cart_screen)
 
     def check_idle(self):
-        # Never go to idle when cart has items
-        if self.payment_in_progress:
-            return
-        if len(self.cart) > 0:
-            return
-        # Never go to idle when in admin panel
-        if hasattr(self, 'admin_screen') and self.stacked_widget.currentWidget() == self.admin_screen:
-            return
-        if time.time() - self.last_activity > IDLE_TIMEOUT:
-            # Do not clear cart by default on idle; keep items when the screen sleeps and wakes up.
-            # If the environment variable CLEAR_CART_ON_IDLE is set to true, clear as before.
-            try:
-                if CLEAR_CART_ON_IDLE:
-                    self.clear_cart()
-            except Exception:
-                # If for some reason the flag is not in scope, fail safe and preserve cart
-                pass
-            self.stacked_widget.setCurrentWidget(self.idle_screen)
+        # The user requested to remove the timeout logic.
+        # The welcome screen should ONLY be shown after payment/clearing trolley.
+        pass
             
     def serial_scanner_thread(self):
         try:

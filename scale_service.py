@@ -116,6 +116,7 @@ class ScaleWorker(QThread):
         self._current_weight = 0.0
         self._is_stable = False
         self._last_settled_weight = 0.0
+        self._tare_completed_once = False
         
         self.hx = None
         self.outlier_filter = KallhovdRollingFilter(size=8)
@@ -215,15 +216,18 @@ class ScaleWorker(QThread):
                     self._current_weight = internal_weight
                     self._is_stable = is_stable
 
-                # Emit live weight (UI can clamp negative values for display, but logic uses true negative values)
-                self.sig_weight_updated.emit(internal_weight, is_stable)
-
-                # Check for settled item placement/removal events
-                if is_stable:
-                    delta = internal_weight - self._last_settled_weight
-                    if abs(delta) >= 3.0: # Minimum 3g change to trigger settled event
-                        self._last_settled_weight = internal_weight
-                        self.sig_weight_settled.emit(delta, internal_weight)
+                # Only emit non-zero live weight if tare has completed once
+                if getattr(self, '_tare_completed_once', False):
+                    self.sig_weight_updated.emit(internal_weight, is_stable)
+                    
+                    # Check for settled item placement/removal events
+                    if is_stable:
+                        delta = internal_weight - self._last_settled_weight
+                        if abs(delta) >= 3.0: # Minimum 3g change to trigger settled event
+                            self._last_settled_weight = internal_weight
+                            self.sig_weight_settled.emit(delta, internal_weight)
+                else:
+                    self.sig_weight_updated.emit(0.0, False)
 
             except Exception as e:
                 print(f"[SCALE] Read error: {e}")
@@ -305,6 +309,7 @@ class ScaleWorker(QThread):
             self._current_weight = 0.0
             self._last_settled_weight = 0.0
             self._is_stable = True
+            self._tare_completed_once = True
 
         self.sig_tare_progress.emit(100, "Tare complete! Scale zeroed.")
         self.sig_tare_completed.emit(True, f"Zero offset calibrated (±{std_dev:.1f} counts noise)", new_offset)

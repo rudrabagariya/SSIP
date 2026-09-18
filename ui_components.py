@@ -2,6 +2,8 @@
 Reusable UI components for Smart Checkout Kiosk
 Uses Qt Virtual Keyboard for touch-friendly input
 """
+import os
+import csv
 import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
@@ -341,23 +343,131 @@ class ScaleTareOverlay(OverlayDialog):
             QTimer.singleShot(2000, self.reject)
 
 
+# Map YOLO class names to friendly product names, barcodes and weights
+YOLO_PRODUCT_MAP = {
+    "banana_wafer": {
+        "name": "Balaji Banana Wafer Mast Mari",
+        "barcode": "8906010500153",
+        "weight": 27.0
+    },
+    "crunchem_simply_salted": {
+        "name": "Balaji Crunchem Simply Salted",
+        "barcode": "8906010500016",
+        "weight": 32.0
+    },
+    "gippi_tornado": {
+        "name": "Balaji Gippi Tornado",
+        "barcode": "8906010504625",
+        "weight": 20.0
+    },
+    "wheels": {
+        "name": "Wheels Balaji",
+        "barcode": "8906010500900",
+        "weight": 22.0
+    },
+    "gopal_vatka": {
+        "name": "Gopal Masala Cup",
+        "barcode": "8908000861008",
+        "weight": 22.0
+    }
+}
+
+
+def resolve_product_info(identifier):
+    """
+    Resolves product name, barcode, weight, and YOLO class from any identifier
+    (YOLO class key, full product name, or barcode).
+    """
+    if not identifier:
+        return {"name": "Unknown Item", "barcode": None, "weight": 0.0, "yolo": None}
+    
+    # 1. Direct YOLO class match
+    if str(identifier) in YOLO_PRODUCT_MAP:
+        info = YOLO_PRODUCT_MAP[str(identifier)]
+        return {
+            "name": info["name"],
+            "barcode": info["barcode"],
+            "weight": info["weight"],
+            "yolo": str(identifier)
+        }
+    
+    # 2. Direct product name or barcode match in YOLO_PRODUCT_MAP
+    for yolo_k, info in YOLO_PRODUCT_MAP.items():
+        if (info["name"].strip().lower() == str(identifier).strip().lower() or 
+            info["barcode"] == str(identifier).strip()):
+            return {
+                "name": info["name"],
+                "barcode": info["barcode"],
+                "weight": info["weight"],
+                "yolo": yolo_k
+            }
+            
+    # 3. Lookup in products.csv
+    try:
+        csv_path = os.path.join(os.path.dirname(__file__), "products.csv")
+        if os.path.exists(csv_path):
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    r_name = row.get('name', '').strip()
+                    r_barcode = row.get('barcode', '').strip()
+                    if (r_name.lower() == str(identifier).strip().lower() or 
+                        r_barcode == str(identifier).strip()):
+                        return {
+                            "name": r_name,
+                            "barcode": r_barcode,
+                            "weight": float(row.get('weight_grams') or 0.0),
+                            "yolo": None
+                        }
+    except Exception as e:
+        print(f"[ProductMeta] Error reading products.csv: {e}")
+        
+    return {"name": str(identifier), "barcode": None, "weight": 0.0, "yolo": None}
+
+
+def load_product_pixmap(barcode, size=(100, 100)):
+    """
+    Loads product image from images/<barcode>.png (or .jpg), returning scaled QPixmap.
+    """
+    if barcode:
+        base_dir = os.path.dirname(__file__)
+        for ext in [".png", ".jpg", ".jpeg"]:
+            p = os.path.join(base_dir, "images", f"{barcode}{ext}")
+            if os.path.exists(p):
+                pix = QPixmap(p)
+                if not pix.isNull():
+                    return pix.scaled(size[0], size[1], Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return None
+
+
 class ItemWeightVerificationOverlay(OverlayDialog):
     """
-    Active item-by-item verification dialog.
-    Triggered when an item with weight_grams > 0 is scanned.
-    Waits for the user to place the item into the trolley,
-    tracks the weight delta, and validates against expected weight.
+    Active item-by-item verification dialog with dual weight and visual inspection.
+    Enforces a strict 1-time 10s visual verification window.
+    If a wrong item is placed, presents a side-by-side discrimination card showing
+    both the expected product and the wrong detected product images, and permanently
+    locks until the wrong item is physically removed from the trolley.
     """
-    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0, camera_worker=None, expected_yolo_class=None):
+    def __init__(self, parent, scale_worker, product_name, expected_weight, 
+                 tolerance_pct=20.0, tolerance_g=8.0, camera_worker=None, 
+                 expected_yolo_class=None, expected_barcode=None):
         super().__init__(parent)
         self.scale_worker = scale_worker
         self.camera_worker = camera_worker
         self.expected_yolo_class = expected_yolo_class
+        self.expected_barcode = expected_barcode
         self.product_name = product_name
         self.expected_weight = float(expected_weight)
         self.tolerance_pct = tolerance_pct
         self.tolerance_g = tolerance_g
         self.measured_weight = self.expected_weight
+
+        # Auto-resolve product info if barcode or yolo class was not supplied
+        prod_info = resolve_product_info(self.product_name)
+        if not self.expected_barcode:
+            self.expected_barcode = prod_info.get("barcode")
+        if not self.expected_yolo_class:
+            self.expected_yolo_class = prod_info.get("yolo")
 
         # Compute acceptable bounds
         tol = max(self.tolerance_g, self.expected_weight * (self.tolerance_pct / 100.0))
@@ -367,61 +477,214 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
         self.verified = False
         self.weight_verified = False
-        self.content_container.setFixedWidth(540)
+        self.visual_verifying = False
+        self.visual_failed = False
+        self.match_count = 0
+        self.wrong_item_counts = {}
+        self.last_detected_items = []
 
-        # Title
-        title_label = QLabel("📦 Place Item into Trolley")
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b; margin-bottom: 4px;")
-        self.content_layout.addWidget(title_label)
+        self.content_container.setFixedWidth(560)
 
-        # Product Name & Expected Weight Box
-        prod_box = QFrame()
-        prod_box.setStyleSheet("background-color: #f1f5f9; border-radius: 12px; padding: 12px;")
-        pb_layout = QVBoxLayout(prod_box)
-        pb_layout.setContentsMargins(12, 10, 12, 10)
+        # 1. Title
+        self.title_label = QLabel("📦 Place Item into Trolley")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 21px; font-weight: 800; color: #1e293b; margin-bottom: 2px;")
+        self.content_layout.addWidget(self.title_label)
+
+        # 2. Product Name & Expected Info Box (Normal State)
+        self.prod_box = QFrame()
+        self.prod_box.setStyleSheet("background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 10px;")
+        pb_layout = QHBoxLayout(self.prod_box)
+        pb_layout.setContentsMargins(12, 8, 12, 8)
+        pb_layout.setSpacing(14)
         
+        # Expected Thumbnail
+        self.prod_thumb_label = QLabel()
+        self.prod_thumb_label.setFixedSize(54, 54)
+        self.prod_thumb_label.setAlignment(Qt.AlignCenter)
+        self.prod_thumb_label.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px;")
+        exp_thumb = load_product_pixmap(self.expected_barcode, size=(50, 50))
+        if exp_thumb:
+            self.prod_thumb_label.setPixmap(exp_thumb)
+        else:
+            self.prod_thumb_label.setText("📦")
+            self.prod_thumb_label.setStyleSheet("font-size: 22px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px;")
+        pb_layout.addWidget(self.prod_thumb_label)
+
+        prod_text_layout = QVBoxLayout()
+        prod_text_layout.setSpacing(2)
         p_name = QLabel(self.product_name)
-        p_name.setAlignment(Qt.AlignCenter)
-        p_name.setStyleSheet("font-size: 18px; font-weight: 700; color: #0f172a;")
+        p_name.setStyleSheet("font-size: 16px; font-weight: 700; color: #0f172a;")
         p_name.setWordWrap(True)
-        pb_layout.addWidget(p_name)
+        prod_text_layout.addWidget(p_name)
 
-        target_info = QLabel("Please place the item into the trolley to verify")
-        target_info.setAlignment(Qt.AlignCenter)
-        target_info.setStyleSheet("font-size: 14px; color: #64748b; font-weight: 500; margin-top: 4px;")
-        pb_layout.addWidget(target_info)
-        self.content_layout.addWidget(prod_box)
+        target_info = QLabel(f"Expected weight: ~{self.expected_weight:.0f}g (±{tol:.0f}g)")
+        target_info.setStyleSheet("font-size: 13px; color: #64748b; font-weight: 500;")
+        prod_text_layout.addWidget(target_info)
+        pb_layout.addLayout(prod_text_layout, 1)
 
-        # Live Reading Box
+        self.content_layout.addWidget(self.prod_box)
+
+        # 3. Live Reading & Status Box
         self.reading_box = QFrame()
-        self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 12px;")
+        self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 10px;")
         rb_layout = QVBoxLayout(self.reading_box)
+        rb_layout.setSpacing(6)
         
         self.live_diff_label = QLabel("Waiting for item...")
         self.live_diff_label.setAlignment(Qt.AlignCenter)
         self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
         rb_layout.addWidget(self.live_diff_label)
 
-        self.live_status_label = QLabel("Place the item into the trolley to verify")
+        self.live_status_label = QLabel(f"Please place '{self.product_name}' into the trolley")
         self.live_status_label.setAlignment(Qt.AlignCenter)
-        self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6; font-weight: 500;")
         self.live_status_label.setWordWrap(True)
         rb_layout.addWidget(self.live_status_label)
-        
-        self.wrong_image_label = QLabel()
-        self.wrong_image_label.setAlignment(Qt.AlignCenter)
-        self.wrong_image_label.setVisible(False)
-        rb_layout.addWidget(self.wrong_image_label)
+
+        # Countdown Progress Bar (for visual check)
+        self.countdown_bar = QProgressBar()
+        self.countdown_bar.setRange(0, 100)
+        self.countdown_bar.setValue(100)
+        self.countdown_bar.setTextVisible(True)
+        self.countdown_bar.setFixedHeight(20)
+        self.countdown_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #93c5fd;
+                border-radius: 10px;
+                text-align: center;
+                font-weight: 700;
+                font-size: 11px;
+                color: #1e3a8a;
+                background-color: #dbeafe;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #10b981);
+                border-radius: 9px;
+            }
+        """)
+        self.countdown_bar.setVisible(False)
+        rb_layout.addWidget(self.countdown_bar)
         
         self.content_layout.addWidget(self.reading_box)
 
-        # Action Buttons
+        # 4. Side-by-Side Comparison Container (Failure State)
+        self.comparison_box = QFrame()
+        self.comparison_box.setStyleSheet("background-color: #ffffff; border: 1.5px solid #fca5a5; border-radius: 14px; padding: 6px;")
+        comp_layout = QHBoxLayout(self.comparison_box)
+        comp_layout.setContentsMargins(10, 8, 10, 8)
+        comp_layout.setSpacing(10)
+
+        # --- Left Card: Expected Item ---
+        self.expected_card = QFrame()
+        self.expected_card.setStyleSheet("background-color: #f0fdf4; border: 2px solid #22c55e; border-radius: 10px; padding: 6px;")
+        exp_layout = QVBoxLayout(self.expected_card)
+        exp_layout.setContentsMargins(6, 6, 6, 6)
+        exp_layout.setSpacing(4)
+        exp_layout.setAlignment(Qt.AlignCenter)
+
+        exp_badge = QLabel("🟢 EXPECTED")
+        exp_badge.setAlignment(Qt.AlignCenter)
+        exp_badge.setStyleSheet("font-size: 11px; font-weight: 800; color: #15803d; background: #dcfce7; border-radius: 5px; padding: 2px 6px;")
+        exp_layout.addWidget(exp_badge)
+
+        self.expected_img_label = QLabel()
+        self.expected_img_label.setFixedSize(100, 100)
+        self.expected_img_label.setAlignment(Qt.AlignCenter)
+        self.expected_img_label.setStyleSheet("background: #ffffff; border: 1px solid #86efac; border-radius: 8px;")
+        exp_layout.addWidget(self.expected_img_label)
+
+        self.expected_name_label = QLabel(self.product_name)
+        self.expected_name_label.setAlignment(Qt.AlignCenter)
+        self.expected_name_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #14532d;")
+        self.expected_name_label.setWordWrap(True)
+        exp_layout.addWidget(self.expected_name_label)
+
+        self.expected_sub_label = QLabel(f"Expected: ~{self.expected_weight:.0f}g")
+        self.expected_sub_label.setAlignment(Qt.AlignCenter)
+        self.expected_sub_label.setStyleSheet("font-size: 11px; color: #16a34a; font-weight: 600;")
+        exp_layout.addWidget(self.expected_sub_label)
+
+        comp_layout.addWidget(self.expected_card, 1)
+
+        # --- Middle Divider: VS / Mismatch Badge ---
+        vs_layout = QVBoxLayout()
+        vs_layout.setAlignment(Qt.AlignCenter)
+        vs_layout.setSpacing(2)
+
+        vs_badge = QLabel("≠")
+        vs_badge.setAlignment(Qt.AlignCenter)
+        vs_badge.setFixedSize(36, 36)
+        vs_badge.setStyleSheet("""
+            background-color: #fee2e2;
+            color: #dc2626;
+            font-size: 18px;
+            font-weight: 900;
+            border: 2px solid #f87171;
+            border-radius: 18px;
+        """)
+        vs_layout.addWidget(vs_badge)
+
+        vs_text = QLabel("WRONG")
+        vs_text.setAlignment(Qt.AlignCenter)
+        vs_text.setStyleSheet("font-size: 9px; font-weight: 900; color: #ef4444;")
+        vs_layout.addWidget(vs_text)
+        comp_layout.addLayout(vs_layout)
+
+        # --- Right Card: Wrong Item Placed ---
+        self.wrong_card = QFrame()
+        self.wrong_card.setStyleSheet("background-color: #fef2f2; border: 2px solid #ef4444; border-radius: 10px; padding: 6px;")
+        wrong_layout = QVBoxLayout(self.wrong_card)
+        wrong_layout.setContentsMargins(6, 6, 6, 6)
+        wrong_layout.setSpacing(4)
+        wrong_layout.setAlignment(Qt.AlignCenter)
+
+        wrong_badge = QLabel("❌ YOU PLACED")
+        wrong_badge.setAlignment(Qt.AlignCenter)
+        wrong_badge.setStyleSheet("font-size: 11px; font-weight: 800; color: #991b1b; background: #fee2e2; border-radius: 5px; padding: 2px 6px;")
+        wrong_layout.addWidget(wrong_badge)
+
+        self.wrong_img_label = QLabel()
+        self.wrong_img_label.setFixedSize(100, 100)
+        self.wrong_img_label.setAlignment(Qt.AlignCenter)
+        self.wrong_img_label.setStyleSheet("background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+        wrong_layout.addWidget(self.wrong_img_label)
+
+        self.wrong_name_label = QLabel("Wrong Item")
+        self.wrong_name_label.setAlignment(Qt.AlignCenter)
+        self.wrong_name_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #991b1b;")
+        self.wrong_name_label.setWordWrap(True)
+        wrong_layout.addWidget(self.wrong_name_label)
+
+        self.wrong_sub_label = QLabel("Detected by camera")
+        self.wrong_sub_label.setAlignment(Qt.AlignCenter)
+        self.wrong_sub_label.setStyleSheet("font-size: 11px; color: #dc2626; font-weight: 600;")
+        wrong_layout.addWidget(self.wrong_sub_label)
+
+        comp_layout.addWidget(self.wrong_card, 1)
+
+        self.comparison_box.setVisible(False)
+        self.content_layout.addWidget(self.comparison_box)
+
+        # 5. Error Action Instruction Banner
+        self.error_action_banner = QFrame()
+        self.error_action_banner.setStyleSheet("background-color: #fff1f2; border: 1.5px solid #f43f5e; border-radius: 10px; padding: 8px;")
+        eab_layout = QVBoxLayout(self.error_action_banner)
+        eab_layout.setContentsMargins(8, 6, 8, 6)
+        self.error_action_text = QLabel("👉 Please REMOVE the wrong item from the trolley to try again.")
+        self.error_action_text.setAlignment(Qt.AlignCenter)
+        self.error_action_text.setWordWrap(True)
+        self.error_action_text.setStyleSheet("font-size: 14px; font-weight: 800; color: #be123c;")
+        eab_layout.addWidget(self.error_action_text)
+        self.error_action_banner.setVisible(False)
+        self.content_layout.addWidget(self.error_action_banner)
+
+        # 6. Action Buttons (Cancel)
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setMinimumHeight(46)
+        self.cancel_btn.setMinimumHeight(44)
         self.cancel_btn.setCursor(Qt.PointingHandCursor)
         self.cancel_btn.setStyleSheet("""
             QPushButton {
@@ -436,7 +699,6 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         """)
         self.cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(self.cancel_btn)
-
         self.content_layout.addLayout(btn_layout)
 
         # Connect live scale signal
@@ -453,234 +715,279 @@ class ItemWeightVerificationOverlay(OverlayDialog):
 
         diff = current_weight - self.initial_weight
 
-        if self.weight_verified:
+        # 1. Handling locked failed state (wrong item placed)
+        if self.visual_failed:
             if diff <= 2.0:
+                # User removed the wrong item from the trolley! Reset to clean state
+                self.visual_failed = False
+                self.weight_verified = False
+                self.visual_verifying = False
+                self.match_count = 0
+                self.wrong_item_counts = {}
+                self.last_detected_items = []
+                if hasattr(self, 'visual_timer') and self.visual_timer:
+                    self.visual_timer.stop()
+                self._disconnect_camera()
+
+                # Restore standard UI
+                self.title_label.setText("📦 Place Item into Trolley")
+                self.title_label.setStyleSheet("font-size: 21px; font-weight: 800; color: #1e293b; margin-bottom: 2px;")
+                self.comparison_box.setVisible(False)
+                self.error_action_banner.setVisible(False)
+                self.prod_box.setVisible(True)
+                self.countdown_bar.setVisible(False)
+                self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 10px;")
+                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
+                self.live_diff_label.setText("Waiting for item...")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6; font-weight: 500;")
+                self.live_status_label.setText(f"Please place '{self.product_name}' into the trolley")
+            else:
+                self.live_diff_label.setText(f"❌ Scale: +{diff:.1f} g (Remove item)")
+            return
+
+        # 2. Handling active visual verification countdown
+        if self.visual_verifying:
+            if diff <= 2.0:
+                # User took the item back off during the 10s check
+                self.visual_verifying = False
                 self.weight_verified = False
                 if hasattr(self, 'visual_timer') and self.visual_timer:
                     self.visual_timer.stop()
                 self._disconnect_camera()
+                self.countdown_bar.setVisible(False)
                 self.live_diff_label.setText("Waiting for item...")
-                self.live_status_label.setText("Place the item into the trolley")
-                self.wrong_image_label.setVisible(False)
-                self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
+                self.live_status_label.setText(f"Please place '{self.product_name}' into the trolley")
+                self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 10px;")
+            else:
+                self.live_diff_label.setText(f"+{diff:.1f} g")
             return
 
+        # 3. Idle / waiting for item
         if diff <= 2.0:
             self.live_diff_label.setText("Waiting for item...")
-            self.live_status_label.setText("Place the item into the trolley")
-            self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
+            self.live_status_label.setText(f"Please place '{self.product_name}' into the trolley")
+            self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px; padding: 10px;")
+            self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #1d4ed8;")
+            self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
             return
 
-        # An item has been placed
+        # 4. An item has been placed on the scale
         self.live_diff_label.setText(f"+{diff:.1f} g")
 
         if self.min_weight <= diff <= self.max_weight:
             if is_stable:
-                self.weight_verified = True
                 self.measured_weight = round(diff, 1)
+                self.weight_verified = True
                 
                 if self.camera_worker and self.expected_yolo_class:
-                    self.live_status_label.setText(f"Weight matched! Looking for {self.expected_yolo_class}...")
-                    self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
-                    self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
                     self.start_visual_verification()
                 else:
                     self.verified = True
                     self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
-                    self.live_status_label.setText("Weight matched! Adding to cart...")
-                    self.wrong_image_label.setVisible(False)
-                    self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                    self.live_status_label.setText(f"Weight matched! Added '{self.product_name}' to cart...")
+                    self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px; padding: 10px;")
                     self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
                     self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
-                    QTimer.singleShot(800, self.accept)
+                    QTimer.singleShot(700, self.accept)
             else:
                 self.live_status_label.setText("Stabilizing reading...")
-                self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px;")
+                self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px; padding: 10px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #854d0e;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #ca8a04;")
         else:
             if is_stable:
-                self.live_status_label.setText("⚠️ Weight mismatch detected. Please place the correct item.")
-                self.wrong_image_label.setVisible(False)
-                self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+                self.live_status_label.setText(f"⚠️ Weight mismatch: Expected ~{self.expected_weight:.0f}g, got {diff:.1f}g.")
+                self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px; padding: 10px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
     def start_visual_verification(self):
-        """Initiate strict multi-frame visual verification (10s window, 3 positive matches required)."""
+        """Initiate single 10s visual verification window."""
         self.match_count = 0
         self.wrong_item_counts = {}
+        self.last_detected_items = []
         self.required_matches = 3
         self.total_duration_secs = 10.0
         self.start_time = time.time()
+        self.visual_verifying = True
+        self.visual_failed = False
         
+        self.countdown_bar.setValue(100)
+        self.countdown_bar.setFormat("Verifying with camera: 10.0s")
+        self.countdown_bar.setVisible(True)
+        
+        self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px; padding: 10px;")
+        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #15803d; font-weight: 600;")
+        self.live_status_label.setText(f"Weight matched! Checking camera for '{self.product_name}'...")
+
         try:
             self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
             self.camera_worker.sig_camera_error.connect(self.on_camera_error)
         except Exception:
             pass
 
-        # Poll camera every 250ms (up to ~40 frames in 10s)
         self.visual_timer = QTimer(self)
         self.visual_timer.timeout.connect(self._poll_camera)
-        self.visual_timer.start(250)
+        self.visual_timer.start(200)
         self._poll_camera()
 
     def _poll_camera(self):
-        if self.verified or not self.camera_worker:
+        if self.verified or not self.visual_verifying or not self.camera_worker:
             if hasattr(self, 'visual_timer') and self.visual_timer:
                 self.visual_timer.stop()
             return
             
         elapsed = time.time() - self.start_time
         remaining = max(0.0, self.total_duration_secs - elapsed)
+        pct = int((remaining / self.total_duration_secs) * 100)
+        self.countdown_bar.setValue(pct)
+        self.countdown_bar.setFormat(f"Verifying with camera: {remaining:.1f}s")
         
-        if remaining <= 0:
-            # 10s expired without required 3 matches - Strict rejection, no bypass
+        if remaining <= 0.0:
+            # 10s expired without required 3 matches - Strict rejection, runs ONLY ONCE
             if hasattr(self, 'visual_timer') and self.visual_timer:
                 self.visual_timer.stop()
             self._disconnect_camera()
+            self.visual_verifying = False
+            self.visual_failed = True
             
             wrong_item = None
-            if hasattr(self, 'last_detected_items') and self.last_detected_items:
+            if self.wrong_item_counts:
+                wrong_item = max(self.wrong_item_counts, key=self.wrong_item_counts.get)
+            elif self.last_detected_items:
                 for item in self.last_detected_items:
                     if item != self.expected_yolo_class:
                         wrong_item = item
                         break
                         
-            if wrong_item:
-                msg = f"❌ Wrong item detected: '{wrong_item}'. Please place '{self.expected_yolo_class}'."
-                self.live_status_label.setText(msg)
-                
-                # Try to load image
-                try:
-                    import csv
-                    import os
-                    from PySide6.QtGui import QPixmap
-                    barcode = None
-                    with open(os.path.join(os.path.dirname(__file__), "products.csv"), 'r', encoding='utf-8') as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            if row['name'] == wrong_item:
-                                barcode = row['barcode']
-                                break
-                    if barcode:
-                        img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.png")
-                        if not os.path.exists(img_path):
-                            img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
-                        if os.path.exists(img_path):
-                            pix = QPixmap(img_path).scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                            self.wrong_image_label.setPixmap(pix)
-                            self.wrong_image_label.setVisible(True)
-                except Exception as e:
-                    print("Error loading wrong item image:", e)
-            else:
-                self.live_status_label.setText(
-                    f"❌ Item not detected! Expected '{self.expected_yolo_class}'. Please face item to camera."
-                )
-                self.wrong_image_label.setVisible(False)
-                
-            self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
-            self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
-            self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+            self.show_visual_failure(wrong_item_yolo=wrong_item)
             return
 
         self.camera_worker.request_analysis()
 
     def on_camera_detection(self, detected_items):
-        if self.verified:
+        if self.verified or not self.visual_verifying:
             return
             
         self.last_detected_items = detected_items
-
         elapsed = time.time() - self.start_time
         remaining = max(0.0, self.total_duration_secs - elapsed)
 
         print(f"[VisualVerify] Frame: detected={detected_items}, expected={self.expected_yolo_class}, matches={self.match_count}/{self.required_matches}")
 
+        # 1. Check for incorrect items accumulating matches
+        for item in detected_items:
+            if item != self.expected_yolo_class:
+                self.wrong_item_counts[item] = self.wrong_item_counts.get(item, 0) + 1
+                if self.wrong_item_counts[item] >= self.required_matches:
+                    # Immediate failure! (Wrong item confirmed)
+                    if hasattr(self, 'visual_timer') and self.visual_timer:
+                        self.visual_timer.stop()
+                    self._disconnect_camera()
+                    self.visual_verifying = False
+                    self.visual_failed = True
+                    self.show_visual_failure(wrong_item_yolo=item)
+                    return
+
+        # 2. Check for expected class matches
         if self.expected_yolo_class in detected_items:
             self.match_count += 1
             if self.match_count >= self.required_matches:
+                # Successfully verified!
                 self.verified = True
+                self.visual_verifying = False
                 if hasattr(self, 'visual_timer') and self.visual_timer:
                     self.visual_timer.stop()
                 self._disconnect_camera()
+                self.countdown_bar.setVisible(False)
                 self.live_diff_label.setText(f"✅ Verified: +{self.measured_weight:.1f} g")
-                self.live_status_label.setText(f"Visual & Weight verified ({self.required_matches}/{self.required_matches} matches)! Adding to cart...")
-                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
-                self.wrong_image_label.setVisible(False)
-                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                self.live_status_label.setText(f"Visual & Weight verified! Adding '{self.product_name}' to cart...")
+                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 700;")
+                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px; padding: 10px;")
                 QTimer.singleShot(700, self.accept)
                 return
             else:
-                self.live_status_label.setText(f"🔍 Confirmed {self.match_count}/{self.required_matches} visual matches ({remaining:.0f}s left)...")
-                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
-                self.live_status_label.setStyleSheet("font-size: 13px; color: #15803d; font-weight: 600;")
+                self.live_status_label.setText(f"🔍 Confirmed {self.match_count}/{self.required_matches} visual matches ({remaining:.1f}s left)...")
         else:
-            # Check for incorrect items accumulating matches
-            for item in detected_items:
-                if item != self.expected_yolo_class:
-                    if not hasattr(self, 'wrong_item_counts'):
-                        self.wrong_item_counts = {}
-                    self.wrong_item_counts[item] = self.wrong_item_counts.get(item, 0) + 1
-                    
-                    if self.wrong_item_counts[item] >= self.required_matches:
-                        # Fail immediately!
-                        if hasattr(self, 'visual_timer') and self.visual_timer:
-                            self.visual_timer.stop()
-                        self._disconnect_camera()
-                        
-                        msg = f"❌ Wrong item detected: '{item}'. Please place '{self.expected_yolo_class}'."
-                        self.live_status_label.setText(msg)
-                        
-                        # Load image
-                        try:
-                            import csv
-                            import os
-                            from PySide6.QtGui import QPixmap
-                            barcode = None
-                            with open(os.path.join(os.path.dirname(__file__), "products.csv"), 'r', encoding='utf-8') as f:
-                                reader = csv.DictReader(f)
-                                for row in reader:
-                                    if row['name'] == item:
-                                        barcode = row['barcode']
-                                        break
-                            if barcode:
-                                img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.png")
-                                if not os.path.exists(img_path):
-                                    img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
-                                if os.path.exists(img_path):
-                                    pix = QPixmap(img_path).scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                                    self.wrong_image_label.setPixmap(pix)
-                                    self.wrong_image_label.setVisible(True)
-                        except Exception as e:
-                            print("Error loading wrong item image:", e)
-                        
-                        self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
-                        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
-                        self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
-                        return
-
             saw = f" (seeing {', '.join(detected_items)})" if detected_items else ""
-            self.live_status_label.setText(f"Analyzing camera ({remaining:.0f}s left)... Matched {self.match_count}/{self.required_matches}{saw}")
-            self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
-            self.live_status_label.setStyleSheet("font-size: 13px; color: #2563eb; font-weight: 600;")
+            self.live_status_label.setText(f"Analyzing camera ({remaining:.1f}s left)... Matched {self.match_count}/{self.required_matches}{saw}")
+
+    def show_visual_failure(self, wrong_item_yolo=None):
+        """Displays side-by-side discrimination UI and locks until item is removed."""
+        self.visual_failed = True
+        self.visual_verifying = False
+        self.countdown_bar.setVisible(False)
+        
+        self.title_label.setText("⚠️ Item Verification Failed")
+        self.title_label.setStyleSheet("font-size: 21px; font-weight: 800; color: #dc2626; margin-bottom: 2px;")
+        
+        # 1. Setup Expected Product card
+        exp_meta = resolve_product_info(self.product_name)
+        exp_name = exp_meta["name"]
+        exp_barcode = self.expected_barcode or exp_meta.get("barcode")
+        self.expected_name_label.setText(exp_name)
+        self.expected_sub_label.setText(f"Expected: ~{self.expected_weight:.0f}g")
+        exp_pix = load_product_pixmap(exp_barcode, size=(94, 94))
+        if exp_pix:
+            self.expected_img_label.setPixmap(exp_pix)
+        else:
+            self.expected_img_label.setText("📦")
+            self.expected_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #86efac; border-radius: 8px;")
+
+        # 2. Setup Detected Product card
+        if wrong_item_yolo:
+            wrong_meta = resolve_product_info(wrong_item_yolo)
+            wrong_name = wrong_meta["name"]
+            wrong_barcode = wrong_meta.get("barcode")
+            self.wrong_name_label.setText(wrong_name)
+            self.wrong_sub_label.setText("Detected by camera")
+            wrong_pix = load_product_pixmap(wrong_barcode, size=(94, 94))
+            if wrong_pix:
+                self.wrong_img_label.setPixmap(wrong_pix)
+            else:
+                self.wrong_img_label.setText("📦")
+                self.wrong_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+            
+            self.live_status_label.setText(f"❌ Wrong item detected: '{wrong_name}'. Please place '{exp_name}'.")
+            self.error_action_text.setText(f"👉 Please REMOVE '{wrong_name}' from trolley to continue")
+        else:
+            self.wrong_name_label.setText("Unidentified Item")
+            self.wrong_sub_label.setText("Not recognized by camera")
+            self.wrong_img_label.setText("📷")
+            self.wrong_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+            self.live_status_label.setText(f"❌ Camera could not verify '{exp_name}'. Please place item facing camera.")
+            self.error_action_text.setText(f"👉 Please remove item, face label toward camera, and place again")
+
+        # 3. Swap views
+        self.prod_box.setVisible(False)
+        self.comparison_box.setVisible(True)
+        self.error_action_banner.setVisible(True)
+
+        self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #ef4444; border-radius: 12px; padding: 10px;")
+        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+        self.live_diff_label.setText(f"❌ Scale: +{self.measured_weight:.1f} g")
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #b91c1c; font-weight: 700;")
 
     def on_camera_error(self, err_msg):
         print(f"[VisualVerify] Camera error reported: {err_msg}")
         self._disconnect_camera()
         if hasattr(self, 'visual_timer') and self.visual_timer:
             self.visual_timer.stop()
+        self.visual_verifying = False
+        self.visual_failed = True
+        self.countdown_bar.setVisible(False)
+        self.show_visual_failure(wrong_item_yolo=None)
         self.live_status_label.setText(f"❌ Camera error: {err_msg}. Visual check is required.")
-        self.wrong_image_label.setVisible(False)
-        self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
-        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
-        self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
     def _disconnect_camera(self):
         try:
             if self.camera_worker:
                 self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+        try:
+            if self.camera_worker:
                 self.camera_worker.sig_camera_error.disconnect(self.on_camera_error)
         except Exception:
             pass
@@ -689,12 +996,22 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         if hasattr(self, 'visual_timer') and self.visual_timer:
             self.visual_timer.stop()
         self._disconnect_camera()
+        if self.scale_worker:
+            try:
+                self.scale_worker.sig_weight_updated.disconnect(self.on_weight_update)
+            except Exception:
+                pass
         super().reject()
 
     def accept(self):
         if hasattr(self, 'visual_timer') and self.visual_timer:
             self.visual_timer.stop()
         self._disconnect_camera()
+        if self.scale_worker:
+            try:
+                self.scale_worker.sig_weight_updated.disconnect(self.on_weight_update)
+            except Exception:
+                pass
         super().accept()
 
 

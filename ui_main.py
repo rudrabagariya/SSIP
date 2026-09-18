@@ -328,14 +328,21 @@ class SmartKiosk(QMainWindow):
             self.zeroing_in_progress = False
             return
         self.zeroing_in_progress = True
+        if hasattr(self, 'cart_weight_label') and self.cart_weight_label:
+            self.cart_weight_label.setText("🛒 Trolley: Zeroing... 🟡")
         overlay = ScaleTareOverlay(self, self.scale_worker)
         self.scale_worker.request_tare()
         overlay.exec_()
         self.zeroing_in_progress = False
+        if hasattr(self, 'cart_weight_label') and self.cart_weight_label:
+            self.cart_weight_label.setText("🛒 Trolley: 0.0g  🟢")
 
     def on_scale_weight_updated(self, live_weight, is_stable):
         """Update live trolley weight indicator on the cart screen."""
         if hasattr(self, 'cart_weight_label') and self.cart_weight_label:
+            if getattr(self, 'zeroing_in_progress', False):
+                self.cart_weight_label.setText("🛒 Trolley: Zeroing... 🟡")
+                return
             dot = "🟢" if is_stable else "🟡"
             disp_weight = max(0.0, live_weight)
             self.cart_weight_label.setText(f"🛒 Trolley: {disp_weight:.1f}g  {dot}")
@@ -734,7 +741,7 @@ class SmartKiosk(QMainWindow):
 
         cart_actions.addStretch()
 
-        self.cart_weight_label = QLabel("🛒 Trolley: 0.0g  🟢")
+        self.cart_weight_label = QLabel("🛒 Trolley: Zeroing... 🟡")
         self.cart_weight_label.setObjectName("cartWeightLabel")
         self.cart_weight_label.setStyleSheet(f"font-size: {self.fs_px(15)}px; font-weight: 700; color: #0284c7; padding-right: 12px;")
         cart_actions.addWidget(self.cart_weight_label)
@@ -2416,7 +2423,8 @@ class SmartKiosk(QMainWindow):
                         tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
                         tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS,
                         camera_worker=getattr(self, 'camera_worker', None),
-                        expected_yolo_class=expected_yolo_class
+                        expected_yolo_class=expected_yolo_class,
+                        expected_barcode=barcode
                     )
                     if dlg.exec_() != QDialog.Accepted:
                         return
@@ -2557,13 +2565,24 @@ class SmartKiosk(QMainWindow):
             if delta > 0 and self.scale_worker and item.get("weight_grams", 0) > 0:
                 self.verification_in_progress = True
                 try:
+                    yolo_class_map = {
+                        "Balaji Banana Wafer Mast Mari": "banana_wafer",
+                        "Balaji Crunchem Simply Salted": "crunchem_simply_salted",
+                        "Balaji Gippi Tornado": "gippi_tornado",
+                        "Wheels Balaji": "wheels",
+                        "Gopal Masala Cup": "gopal_vatka"
+                    }
+                    expected_yolo_class = yolo_class_map.get(item["name"], None)
                     dlg = ItemWeightVerificationOverlay(
                         self,
                         self.scale_worker,
                         item["name"],
                         item["weight_grams"],
                         tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
-                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS,
+                        camera_worker=getattr(self, 'camera_worker', None),
+                        expected_yolo_class=expected_yolo_class,
+                        expected_barcode=item.get("barcode", None)
                     )
                     if dlg.exec_() != QDialog.Accepted:
                         return

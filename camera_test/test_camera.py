@@ -43,7 +43,7 @@ def main():
         from picamera2 import Picamera2
         print("Initializing Picamera2...")
         cap_picam = Picamera2()
-        config = cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (640, 480)})
+        config = cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (1440, 1080)})
         cap_picam.configure(config)
         cap_picam.start()
         print("Connected using native Picamera2!")

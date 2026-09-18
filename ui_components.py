@@ -444,7 +444,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
 
     def on_weight_update(self, current_weight, is_stable):
-        if self.verified or self.weight_verified:
+        if self.verified:
             return
 
         # If user lifted an item that was already resting on the trolley, adjust baseline
@@ -452,6 +452,18 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             self.initial_weight = current_weight
 
         diff = current_weight - self.initial_weight
+
+        if self.weight_verified:
+            if diff <= 2.0:
+                self.weight_verified = False
+                if hasattr(self, 'visual_timer') and self.visual_timer:
+                    self.visual_timer.stop()
+                self._disconnect_camera()
+                self.live_diff_label.setText("Waiting for item...")
+                self.live_status_label.setText("Place the item into the trolley")
+                self.wrong_image_label.setVisible(False)
+                self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")
+            return
 
         if diff <= 2.0:
             self.live_diff_label.setText("Waiting for item...")
@@ -528,7 +540,6 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             if hasattr(self, 'visual_timer') and self.visual_timer:
                 self.visual_timer.stop()
             self._disconnect_camera()
-            self.weight_verified = False # Reset so customer can reposition item
             
             wrong_item = None
             if hasattr(self, 'last_detected_items') and self.last_detected_items:
@@ -618,7 +629,6 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                         if hasattr(self, 'visual_timer') and self.visual_timer:
                             self.visual_timer.stop()
                         self._disconnect_camera()
-                        self.weight_verified = False # Reset so customer can reposition item
                         
                         msg = f"❌ Wrong item detected: '{item}'. Please place '{self.expected_yolo_class}'."
                         self.live_status_label.setText(msg)
@@ -661,7 +671,6 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self._disconnect_camera()
         if hasattr(self, 'visual_timer') and self.visual_timer:
             self.visual_timer.stop()
-        self.weight_verified = False
         self.live_status_label.setText(f"❌ Camera error: {err_msg}. Visual check is required.")
         self.wrong_image_label.setVisible(False)
         self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")

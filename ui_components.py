@@ -292,9 +292,11 @@ class ItemWeightVerificationOverlay(OverlayDialog):
     Waits for the user to place the item into the trolley,
     tracks the weight delta, and validates against expected weight.
     """
-    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0):
+    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0, camera_worker=None, expected_yolo_class=None):
         super().__init__(parent)
         self.scale_worker = scale_worker
+        self.camera_worker = camera_worker
+        self.expected_yolo_class = expected_yolo_class
         self.product_name = product_name
         self.expected_weight = float(expected_weight)
         self.tolerance_pct = tolerance_pct
@@ -308,6 +310,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
 
         self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
         self.verified = False
+        self.weight_verified = False
         self.content_container.setFixedWidth(540)
 
         # Title
@@ -378,7 +381,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             self.scale_worker.sig_weight_updated.connect(self.on_weight_update)
 
     def on_weight_update(self, current_weight, is_stable):
-        if self.verified:
+        if self.verified or self.weight_verified:
             return
 
         # If user lifted an item that was already resting on the trolley, adjust baseline
@@ -398,14 +401,24 @@ class ItemWeightVerificationOverlay(OverlayDialog):
 
         if self.min_weight <= diff <= self.max_weight:
             if is_stable:
-                self.verified = True
+                self.weight_verified = True
                 self.measured_weight = round(diff, 1)
-                self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
-                self.live_status_label.setText("Weight matched! Adding to cart...")
-                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
-                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
-                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
-                QTimer.singleShot(800, self.accept)
+                
+                if self.camera_worker and self.expected_yolo_class:
+                    self.live_status_label.setText("Weight matched! Analyzing visually...")
+                    self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                    self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+                    
+                    self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+                    self.camera_worker.request_analysis()
+                else:
+                    self.verified = True
+                    self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
+                    self.live_status_label.setText("Weight matched! Adding to cart...")
+                    self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                    self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+                    self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+                    QTimer.singleShot(800, self.accept)
             else:
                 self.live_status_label.setText("Stabilizing reading...")
                 self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px;")
@@ -417,6 +430,43 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+
+    def on_camera_detection(self, class_name, confidence):
+        if self.verified:
+            return
+            
+        try:
+            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+            
+        if class_name == self.expected_yolo_class and confidence >= 0.5:
+            self.verified = True
+            self.live_diff_label.setText(f"✅ Verified: +{self.measured_weight:.1f} g")
+            self.live_status_label.setText("Visual & Weight matched! Adding to cart...")
+            self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+            QTimer.singleShot(800, self.accept)
+        else:
+            # Mismatch or unknown
+            self.weight_verified = False # Reset so they can try again
+            self.live_status_label.setText(f"⚠️ Visual mismatch! Expected {self.expected_yolo_class}, saw {class_name}")
+            self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+            self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+            self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+
+    def reject(self):
+        try:
+            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+        super().reject()
+
+    def accept(self):
+        try:
+            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+        super().accept()
 
     def on_skip(self):
         # Allow staff or customer override

@@ -2383,17 +2383,29 @@ class SmartKiosk(QMainWindow):
             weight_grams = float(row["weight_grams"] or 0.0) if "weight_grams" in row.keys() else 0.0
             actual_w = weight_grams
 
-            # Active item-by-item verification on trolley
+            # Active item-by-item verification on trolley (Weight + Visual)
             if self.scale_worker and weight_grams > 0:
                 self.verification_in_progress = True
                 try:
+                    # Map database product name to YOLO class name
+                    yolo_class_map = {
+                        "Balaji Banana Wafer Mast Mari": "banana_wafer",
+                        "Balaji Crunchem Simply Salted": "crunchem_simply_salted",
+                        "Balaji Gippi Tornado": "gippi_tornado",
+                        "Wheels Balaji": "wheels",
+                        "Gopal Masala Cup": "gopal_vatka"
+                    }
+                    expected_yolo_class = yolo_class_map.get(row["name"], None)
+                    
                     dlg = ItemWeightVerificationOverlay(
                         self, 
                         self.scale_worker, 
                         row["name"], 
                         weight_grams * qty,
                         tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
-                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
+                        tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS,
+                        camera_worker=getattr(self, 'camera_worker', None),
+                        expected_yolo_class=expected_yolo_class
                     )
                     if dlg.exec_() != QDialog.Accepted:
                         return

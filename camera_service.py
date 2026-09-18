@@ -9,7 +9,7 @@ class CameraWorker(QThread):
     It runs continuously to maintain camera feed but only runs YOLO inference
     when explicitly requested to save CPU resources.
     """
-    sig_detection_result = Signal(str, float)  # Emits (class_name, confidence)
+    sig_detection_result = Signal(list)  # Emits [class_name_1, class_name_2, ...]
     sig_camera_error = Signal(str)
 
     def __init__(self, model_path="YOLO_26/best.pt", camera_index=0, conf_threshold=0.60):
@@ -105,8 +105,7 @@ class CameraWorker(QThread):
                     # imgsz=640 for accuracy, conf=0.7 for reducing false positives
                     results = self.model.predict(source=frame, conf=0.70, imgsz=640, verbose=False)
                     
-                    best_conf = 0.0
-                    best_name = ""
+                    detected_items = []
                     
                     for box in results[0].boxes:
                         cls_id = int(box.cls[0])
@@ -124,14 +123,10 @@ class CameraWorker(QThread):
                         if box_area > 0.30:
                             continue
 
-                        if conf > best_conf:
-                            best_conf = conf
-                            best_name = name
+                        if conf > 0.5:
+                            detected_items.append(name)
 
-                    if best_name:
-                        self.sig_detection_result.emit(best_name, best_conf)
-                    else:
-                        self.sig_detection_result.emit("Unknown", 0.0)
+                    self.sig_detection_result.emit(detected_items)
                         
                 except Exception as e:
                     self.sig_camera_error.emit(f"Inference error: {e}")

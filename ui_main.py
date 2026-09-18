@@ -416,30 +416,24 @@ class SmartKiosk(QMainWindow):
             self._unscanned_overlay_active = False
 
     def handle_item_removed_from_trolley(self, lost_weight):
-        """Find the cart item whose weight best matches the lost weight and remove one unit."""
+        """Use camera to deduce exactly which item of this weight was removed, then delete it."""
         if getattr(self, '_item_removed_overlay_active', False):
             return
 
-        best_match_idx = None
-        best_match_diff = float('inf')
-        matched_actual_weight = None
-
-        for idx, item in enumerate(self.cart):
-            actual_list = item.get("actual_weights", [])
-            candidate_weights = actual_list if actual_list else [item.get("weight_grams", 0.0)]
+        from ui_components import AutoRemovalVerificationOverlay
+        
+        dlg = AutoRemovalVerificationOverlay(
+            self, 
+            lost_weight, 
+            self.cart, 
+            getattr(self, 'yolo_class_map', {}), 
+            getattr(self, 'camera_worker', None)
+        )
+        
+        if dlg.exec_() == QDialog.Accepted and dlg.removed_item_idx is not None:
+            best_match_idx = dlg.removed_item_idx
+            matched_actual_weight = dlg.matched_actual_weight
             
-            for cw in candidate_weights:
-                if cw <= 0:
-                    continue
-                diff = abs(cw - lost_weight)
-                # Flexible tolerance window for removal matching
-                tolerance = max(SCALE_WEIGHT_TOLERANCE_GRAMS * 1.5, cw * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
-                if diff <= tolerance and diff < best_match_diff:
-                    best_match_diff = diff
-                    best_match_idx = idx
-                    matched_actual_weight = cw
-
-        if best_match_idx is not None:
             removed_item = self.cart[best_match_idx]
             item_name = removed_item["name"]
             
@@ -453,14 +447,22 @@ class SmartKiosk(QMainWindow):
                 del self.cart[best_match_idx]
 
             self.refresh_cart_display()
+        else:
+            # Could not deduce securely. Show warning.
+            self.show_message(
+                "Removal Ambiguous", 
+                "An item was removed from the trolley, but the camera could not verify which one due to occlusion. Please check your cart and manually remove the item using the UI.", 
+                "warning"
+            )
+            return
 
-            # Show auto-closing notification popup (5 seconds)
-            self._item_removed_overlay_active = True
-            try:
-                dlg = ItemRemovedOverlay(self, item_name, lost_weight, auto_close_secs=5)
-                dlg.exec_()
-            finally:
-                self._item_removed_overlay_active = False
+        # Show auto-closing notification popup (5 seconds)
+        self._item_removed_overlay_active = True
+        try:
+            dlg = ItemRemovedOverlay(self, item_name, lost_weight, auto_close_secs=5)
+            dlg.exec_()
+        finally:
+            self._item_removed_overlay_active = False
 
     def setup_ui(self):
         self.central = QWidget()
@@ -2564,11 +2566,14 @@ class SmartKiosk(QMainWindow):
                 if self.scale_worker and item.get("weight_grams", 0) > 0:
                     self.verification_in_progress = True
                     try:
+                        expected_yolo_class = self.yolo_class_map.get(item["name"], item["name"])
                         dlg = ItemRemovalVerificationOverlay(
                             self,
                             self.scale_worker,
                             item["name"],
                             item["weight_grams"],
+                            expected_yolo_class,
+                            getattr(self, 'camera_worker', None),
                             tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
                             tolerance_g=SCALE_WEIGHT_TOLERANCE_GRAMS
                         )
@@ -2603,11 +2608,14 @@ class SmartKiosk(QMainWindow):
                     if total_expected <= 0:
                         total_expected = item["qty"] * item["weight_grams"]
                     
+                    expected_yolo_class = self.yolo_class_map.get(item["name"], item["name"])
                     dlg = ItemRemovalVerificationOverlay(
                         self,
                         self.scale_worker,
                         f"All {item['qty']}x {item['name']}",
                         total_expected,
+                        expected_yolo_class,
+                        getattr(self, 'camera_worker', None),
                         tolerance_pct=SCALE_WEIGHT_TOLERANCE_PERCENT,
                         tolerance_g=max(SCALE_WEIGHT_TOLERANCE_GRAMS, SCALE_WEIGHT_TOLERANCE_GRAMS * item["qty"])
                     )

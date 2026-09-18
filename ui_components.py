@@ -431,7 +431,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
-    def on_camera_detection(self, class_name, confidence):
+    def on_camera_detection(self, detected_items):
         if self.verified:
             return
             
@@ -440,7 +440,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         except Exception:
             pass
             
-        if class_name == self.expected_yolo_class and confidence >= 0.5:
+        if self.expected_yolo_class in detected_items:
             self.verified = True
             self.live_diff_label.setText(f"✅ Verified: +{self.measured_weight:.1f} g")
             self.live_status_label.setText("Visual & Weight matched! Adding to cart...")
@@ -449,7 +449,8 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         else:
             # Mismatch or unknown
             self.weight_verified = False # Reset so they can try again
-            self.live_status_label.setText(f"⚠️ Visual mismatch! Expected {self.expected_yolo_class}, saw {class_name}")
+            detected_str = ", ".join(detected_items) if detected_items else "nothing"
+            self.live_status_label.setText(f"⚠️ Visual mismatch! Expected {self.expected_yolo_class}, saw {detected_str}")
             self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
             self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
             self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
@@ -481,13 +482,16 @@ class ItemRemovalVerificationOverlay(OverlayDialog):
     Waits for the user to physically remove the item from the trolley,
     tracks the weight drop, and validates against expected weight.
     """
-    def __init__(self, parent, scale_worker, product_name, expected_weight, tolerance_pct=20.0, tolerance_g=8.0):
+    def __init__(self, parent, scale_worker, product_name, expected_weight, expected_yolo_class, camera_worker=None, tolerance_pct=20.0, tolerance_g=8.0):
         super().__init__(parent)
         self.scale_worker = scale_worker
         self.product_name = product_name
         self.expected_weight = float(expected_weight)
+        self.expected_yolo_class = expected_yolo_class
+        self.camera_worker = camera_worker
         self.tolerance_pct = tolerance_pct
         self.tolerance_g = tolerance_g
+        self.weight_verified = False
 
         # Compute acceptable bounds for weight DROP
         tol = max(self.tolerance_g, self.expected_weight * (self.tolerance_pct / 100.0))
@@ -563,13 +567,22 @@ class ItemRemovalVerificationOverlay(OverlayDialog):
 
         if self.min_drop <= diff <= self.max_drop:
             if is_stable:
-                self.verified = True
-                self.live_diff_label.setText(f"✅ Verified: -{diff:.1f} g")
-                self.live_status_label.setText("Removal verified! Updating cart...")
-                self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
-                self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
-                self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
-                QTimer.singleShot(800, self.accept)
+                if not getattr(self, 'weight_verified', False):
+                    self.weight_verified = True
+                    self.measured_weight = diff
+                    self.live_status_label.setText("Weight verified! Verifying visual removal...")
+                    self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+                    
+                    if self.camera_worker:
+                        self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+                        self.camera_worker.request_analysis()
+                    else:
+                        self.verified = True
+                        self.live_diff_label.setText(f"✅ Verified: -{diff:.1f} g")
+                        self.live_status_label.setText("Removal verified! Updating cart...")
+                        self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+                        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+                        QTimer.singleShot(800, self.accept)
             else:
                 self.live_status_label.setText("Stabilizing reading...")
                 self.reading_box.setStyleSheet("background-color: #fefce8; border: 2px solid #fde047; border-radius: 12px;")
@@ -581,6 +594,105 @@ class ItemRemovalVerificationOverlay(OverlayDialog):
                 self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+
+    def on_camera_detection(self, detected_items):
+        if self.verified:
+            return
+            
+        try:
+            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+            
+        if self.expected_yolo_class not in detected_items:
+            self.verified = True
+            self.live_diff_label.setText(f"✅ Verified: -{self.measured_weight:.1f} g")
+            self.live_status_label.setText("Visual & Weight matched! Updating cart...")
+            self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+            self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+            self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
+            QTimer.singleShot(800, self.accept)
+        else:
+            # Mismatch, item still there
+            self.weight_verified = False # Reset so they can try again
+            self.live_status_label.setText(f"⚠️ Visual mismatch! {self.expected_yolo_class} is still in the trolley.")
+            self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+            self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+            self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+
+
+
+class AutoRemovalVerificationOverlay(OverlayDialog):
+    """
+    Auto-verifies a removal without user interaction by checking YOLO.
+    """
+    def __init__(self, parent, lost_weight, cart, yolo_class_map, camera_worker):
+        super().__init__(parent)
+        self.parent_ui = parent
+        self.lost_weight = lost_weight
+        self.cart = cart
+        self.yolo_class_map = yolo_class_map
+        self.camera_worker = camera_worker
+        self.removed_item_idx = None
+        self.matched_actual_weight = None
+
+        self.content_container.setFixedWidth(500)
+        self.msg_label = QLabel("Verifying removal via camera...")
+        self.msg_label.setAlignment(Qt.AlignCenter)
+        self.msg_label.setStyleSheet("font-size: 18px; font-weight: 700; color: #1e293b;")
+        self.content_layout.addWidget(self.msg_label)
+
+        if self.camera_worker:
+            self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+            self.camera_worker.request_analysis()
+        else:
+            # Fallback if no camera
+            self.on_camera_detection([])
+
+    def on_camera_detection(self, detected_items):
+        try:
+            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+        except Exception:
+            pass
+
+        from config import SCALE_WEIGHT_TOLERANCE_GRAMS, SCALE_WEIGHT_TOLERANCE_PERCENT
+        
+        candidates = []
+        for idx, item in enumerate(self.cart):
+            actual_list = item.get("actual_weights", [])
+            candidate_weights = actual_list if actual_list else [item.get("weight_grams", 0.0)]
+            for cw in candidate_weights:
+                if cw <= 0: continue
+                diff = abs(cw - self.lost_weight)
+                tol = max(SCALE_WEIGHT_TOLERANCE_GRAMS * 1.5, cw * (SCALE_WEIGHT_TOLERANCE_PERCENT / 100.0))
+                if diff <= tol:
+                    candidates.append((idx, item, cw))
+
+        if not candidates:
+            self.reject()
+            return
+
+        # If camera is active, filter candidates to those missing from the YOLO view
+        if self.camera_worker:
+            missing_candidates = []
+            for idx, item, cw in candidates:
+                expected_yolo_class = self.yolo_class_map.get(item["name"], item["name"])
+                if expected_yolo_class not in detected_items:
+                    missing_candidates.append((idx, item, cw))
+            
+            if len(missing_candidates) == 1:
+                self.removed_item_idx, _, self.matched_actual_weight = missing_candidates[0]
+                self.accept()
+            elif len(missing_candidates) > 1:
+                # Ambiguous, just reject
+                self.reject()
+            else:
+                # None are missing? Reject
+                self.reject()
+        else:
+            # No camera, fallback to first match
+            self.removed_item_idx, _, self.matched_actual_weight = candidates[0]
+            self.accept()
 
 
 class ItemRemovedOverlay(OverlayDialog):
@@ -760,37 +872,11 @@ class UnscannedItemOverlay(OverlayDialog):
         sb_layout.addWidget(self.live_weight_label)
         self.content_layout.addWidget(self.status_box)
 
-        # Bottom row: Staff override button (in case assistance is needed)
-        btn_layout = QHBoxLayout()
-        btn_layout.setContentsMargins(0, 4, 0, 0)
-        
-        self.override_btn = QPushButton("Staff Assist / Override")
-        self.override_btn.setMinimumHeight(38)
-        self.override_btn.setCursor(Qt.PointingHandCursor)
-        self.override_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f1f5f9;
-                color: #64748b;
-                border: 1px solid #cbd5e1;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 600;
-                padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #e2e8f0;
-                color: #334155;
-            }
-        """)
-        self.override_btn.clicked.connect(self.on_override)
-        btn_layout.addWidget(self.override_btn)
-        self.content_layout.addLayout(btn_layout)
+        # Admin override button removed for security
 
         # Connect live scale signal
         if self.scale_worker:
             self.scale_worker.sig_weight_updated.connect(self.on_scale_update)
-        else:
-            self.override_btn.setText("Close (No Scale Connected)")
 
     def on_scale_update(self, current_weight, is_stable):
         if self.item_removed:
@@ -856,30 +942,13 @@ class UnscannedItemOverlay(OverlayDialog):
             except Exception:
                 pass
 
-    def on_camera_detection(self, class_name, confidence):
-        if class_name != "Unknown" and confidence >= 0.5:
-            self.msg_label.setText(f"You placed <b>{class_name}</b> without scanning!<br>Please scan its barcode or remove it from the trolley.")
+    def on_camera_detection(self, detected_items):
+        if detected_items:
+            items_str = ", ".join(detected_items)
+            self.msg_label.setText(f"You placed <b>{items_str}</b> without scanning!<br>Please scan its barcode or remove it from the trolley.")
         else:
             self.msg_label.setText("Please first scan the item before putting onto the trolley.")
 
-    def on_override(self):
-        from config import ADMIN_PASSWORD
-        dialog = TouchInputDialog(
-            self,
-            "Admin Override",
-            "Enter admin password:",
-            is_password=True
-        )
-        if dialog.exec_() == QDialog.Accepted:
-            if dialog.get_text() == ADMIN_PASSWORD:
-                self._disconnect_scale()
-                self.accept()
-            else:
-                if hasattr(self.parent(), 'show_message'):
-                    self.parent().show_message("Invalid Password", "Incorrect admin password.", "warning")
-                else:
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, "Invalid Password", "Incorrect admin password.")
     def accept(self):
         self._disconnect_scale()
         super().accept()

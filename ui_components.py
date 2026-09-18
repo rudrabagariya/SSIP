@@ -406,7 +406,14 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.live_status_label = QLabel("Place the item into the trolley to verify")
         self.live_status_label.setAlignment(Qt.AlignCenter)
         self.live_status_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
+        self.live_status_label.setWordWrap(True)
         rb_layout.addWidget(self.live_status_label)
+        
+        self.wrong_image_label = QLabel()
+        self.wrong_image_label.setAlignment(Qt.AlignCenter)
+        self.wrong_image_label.setVisible(False)
+        rb_layout.addWidget(self.wrong_image_label)
+        
         self.content_layout.addWidget(self.reading_box)
 
         # Action Buttons
@@ -469,6 +476,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                     self.verified = True
                     self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
                     self.live_status_label.setText("Weight matched! Adding to cart...")
+                    self.wrong_image_label.setVisible(False)
                     self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
                     self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
                     self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
@@ -481,6 +489,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         else:
             if is_stable:
                 self.live_status_label.setText("⚠️ Weight mismatch detected. Please place the correct item.")
+                self.wrong_image_label.setVisible(False)
                 self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
@@ -519,9 +528,46 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.visual_timer.stop()
             self._disconnect_camera()
             self.weight_verified = False # Reset so customer can reposition item
-            self.live_status_label.setText(
-                f"❌ Visual verification failed! Expected '{self.expected_yolo_class}' (only matched {self.match_count}/{self.required_matches}). Please face item to camera."
-            )
+            
+            wrong_item = None
+            if hasattr(self, 'last_detected_items') and self.last_detected_items:
+                for item in self.last_detected_items:
+                    if item != self.expected_yolo_class:
+                        wrong_item = item
+                        break
+                        
+            if wrong_item:
+                msg = f"❌ Wrong item detected: '{wrong_item}'. Please place '{self.expected_yolo_class}'."
+                self.live_status_label.setText(msg)
+                
+                # Try to load image
+                try:
+                    import csv
+                    import os
+                    from PySide6.QtGui import QPixmap
+                    barcode = None
+                    with open(os.path.join(os.path.dirname(__file__), "products.csv"), 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            if row['name'] == wrong_item:
+                                barcode = row['barcode']
+                                break
+                    if barcode:
+                        img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.png")
+                        if not os.path.exists(img_path):
+                            img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
+                        if os.path.exists(img_path):
+                            pix = QPixmap(img_path).scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            self.wrong_image_label.setPixmap(pix)
+                            self.wrong_image_label.setVisible(True)
+                except Exception as e:
+                    print("Error loading wrong item image:", e)
+            else:
+                self.live_status_label.setText(
+                    f"❌ Item not detected! Expected '{self.expected_yolo_class}'. Please face item to camera."
+                )
+                self.wrong_image_label.setVisible(False)
+                
             self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
             self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
             self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
@@ -532,6 +578,8 @@ class ItemWeightVerificationOverlay(OverlayDialog):
     def on_camera_detection(self, detected_items):
         if self.verified:
             return
+            
+        self.last_detected_items = detected_items
 
         elapsed = time.time() - self.start_time
         remaining = max(0.0, self.total_duration_secs - elapsed)
@@ -548,6 +596,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.live_diff_label.setText(f"✅ Verified: +{self.measured_weight:.1f} g")
                 self.live_status_label.setText(f"Visual & Weight verified ({self.required_matches}/{self.required_matches} matches)! Adding to cart...")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+                self.wrong_image_label.setVisible(False)
                 self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
                 QTimer.singleShot(700, self.accept)
                 return
@@ -568,6 +617,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             self.visual_timer.stop()
         self.weight_verified = False
         self.live_status_label.setText(f"❌ Camera error: {err_msg}. Visual check is required.")
+        self.wrong_image_label.setVisible(False)
         self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
         self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
         self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")

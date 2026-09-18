@@ -22,6 +22,8 @@ load_cell_test/calibration.json
 
 # Large Datasets and Training Images (Not needed on Pi)
 dataset/
+dataset_raw/
+*.zip
 YOLO_26/All_Products_Flattened/
 YOLO_26/background/
 YOLO_26/background /

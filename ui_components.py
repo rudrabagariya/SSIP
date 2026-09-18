@@ -7,25 +7,26 @@ from PySide6.QtWidgets import (
     QLineEdit, QDialog, QSizePolicy, QFrame, QGraphicsDropShadowEffect,
     QProgressBar
 )
-from PySide6.QtCore import Qt, Signal, QEventLoop, QSize, QRect, QPoint, QTimer
-from PySide6.QtGui import QColor, QPalette, QBrush
+from PySide6.QtCore import Qt, Signal, QEventLoop, QSize, QRect, QPoint, QTimer, QEvent
+from PySide6.QtGui import QColor, QPalette, QBrush, QPainter, QImage, QPixmap
 
 class OverlayDialog(QWidget):
     """
     Base class for custom overlay dialogs that replace native QDialogs.
     Renders inside the application window to prevent OS window management (minimize/close).
+    Automatically locks to parent window size and centers modal content.
     """
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_widget = parent
-        # Cover the entire parent
-        self.setGeometry(parent.rect())
         
-        # Semi-transparent background
-        self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setBrush(QPalette.Window, QBrush(QColor(0, 0, 0, 180)))
-        self.setPalette(palette)
+        # Cover parent window immediately
+        self.update_geometry()
+        if self.parent_widget:
+            self.parent_widget.installEventFilter(self)
+        
+        # Semi-transparent background setup
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         
         # Main layout for the overlay (centers the content)
         self.main_layout = QVBoxLayout(self)
@@ -37,22 +38,25 @@ class OverlayDialog(QWidget):
         self.content_container.setObjectName("overlayContent")
         self.content_container.setStyleSheet("""
             QFrame#overlayContent {
-                background-color: white;
-                border-radius: 16px;
-                border: 1px solid #e0e0e0;
+                background-color: #ffffff;
+                border-radius: 18px;
+                border: 1px solid #cbd5e1;
+            }
+            QFrame#overlayContent QLabel {
+                background-color: transparent;
             }
         """)
         
         # Add shadow to content
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        shadow.setOffset(0, 10)
+        shadow.setColor(QColor(0, 0, 0, 75))
+        shadow.setOffset(0, 8)
         self.content_container.setGraphicsEffect(shadow)
         
         self.content_layout = QVBoxLayout(self.content_container)
         self.content_layout.setContentsMargins(24, 24, 24, 24)
-        self.content_layout.setSpacing(16)
+        self.content_layout.setSpacing(14)
         
         self.main_layout.addWidget(self.content_container)
         
@@ -63,9 +67,25 @@ class OverlayDialog(QWidget):
         # Hide by default
         self.setVisible(False)
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        # Draw smooth semi-transparent dark backdrop over the whole application
+        painter.fillRect(self.rect(), QColor(15, 23, 42, 145))
+
+    def eventFilter(self, obj, event):
+        if obj == self.parent_widget and event.type() in (QEvent.Resize, QEvent.Show, QEvent.WindowStateChange):
+            self.update_geometry()
+        return super().eventFilter(obj, event)
+
+    def update_geometry(self):
+        if self.parent_widget:
+            self.setGeometry(0, 0, self.parent_widget.width(), self.parent_widget.height())
+
+    def showEvent(self, event):
+        self.update_geometry()
+        super().showEvent(event)
+
     def setLayout(self, layout):
-        # Redirect layout setting to content container
-        # Note: This is a bit hacky, better to add widgets to content_layout directly
         pass
 
     def add_widget(self, widget):
@@ -76,6 +96,7 @@ class OverlayDialog(QWidget):
         
     def exec_(self):
         """Block until accepted or rejected, similar to QDialog.exec_()"""
+        self.update_geometry()
         self.setVisible(True)
         self.raise_()
         self.setFocus()
@@ -98,9 +119,7 @@ class OverlayDialog(QWidget):
             self._event_loop.quit()
             
     def resizeEvent(self, event):
-        # Keep covering the parent when resized
-        if self.parent_widget:
-            self.setGeometry(self.parent_widget.rect())
+        self.update_geometry()
         super().resizeEvent(event)
 
 class TouchInputDialog(OverlayDialog):
@@ -216,23 +235,59 @@ class ScaleTareOverlay(OverlayDialog):
     def __init__(self, parent, scale_worker):
         super().__init__(parent)
         self.scale_worker = scale_worker
-        self.content_container.setFixedWidth(520)
+        self.content_container.setFixedWidth(460)
 
-        # Icon / Header
-        icon_label = QLabel("🛒")
-        icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setStyleSheet("font-size: 48px; margin-bottom: 5px;")
-        self.content_layout.addWidget(icon_label)
+        # Brand Icon Badge
+        icon_container = QWidget()
+        icon_container.setStyleSheet("background: transparent;")
+        icon_layout = QHBoxLayout(icon_container)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        icon_layout.setAlignment(Qt.AlignCenter)
+
+        icon_badge = QLabel()
+        icon_badge.setAlignment(Qt.AlignCenter)
+        icon_badge.setFixedSize(60, 60)
+        icon_badge.setStyleSheet("""
+            background-color: #eef2ff;
+            border-radius: 30px;
+            border: 1.5px solid #c7d2fe;
+        """)
+
+        cart_loaded = False
+        try:
+            import os
+            base_dir = os.path.dirname(__file__)
+            cart_path = os.path.join(base_dir, "cart.png")
+            if os.path.exists(cart_path):
+                img = QImage(cart_path).convertToFormat(QImage.Format_ARGB32)
+                for y in range(img.height()):
+                    for x in range(img.width()):
+                        c = QColor(img.pixel(x, y))
+                        if c.red() >= 240 and c.green() >= 240 and c.blue() >= 240:
+                            c.setAlpha(0)
+                            img.setPixelColor(x, y, c)
+                pix = QPixmap.fromImage(img).scaled(34, 34, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                icon_badge.setPixmap(pix)
+                cart_loaded = True
+        except Exception:
+            pass
+
+        if not cart_loaded:
+            icon_badge.setText("⚖️")
+            icon_badge.setStyleSheet("font-size: 28px; background: #eef2ff; border-radius: 30px; border: 1.5px solid #c7d2fe;")
+
+        icon_layout.addWidget(icon_badge)
+        self.content_layout.addWidget(icon_container)
 
         title_label = QLabel("Zeroing Smart Trolley")
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #1e293b;")
+        title_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #0f172a; margin-top: 2px;")
         self.content_layout.addWidget(title_label)
 
         sub_label = QLabel("Please ensure the trolley is empty and untouched.")
         sub_label.setAlignment(Qt.AlignCenter)
         sub_label.setWordWrap(True)
-        sub_label.setStyleSheet("font-size: 14px; color: #64748b; margin-bottom: 15px;")
+        sub_label.setStyleSheet("font-size: 13px; color: #64748b; margin-bottom: 6px;")
         self.content_layout.addWidget(sub_label)
 
         # Progress Bar
@@ -242,17 +297,17 @@ class ScaleTareOverlay(OverlayDialog):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 2px solid #e2e8f0;
+                border: 1.5px solid #e2e8f0;
                 border-radius: 10px;
                 text-align: center;
                 height: 28px;
-                font-weight: bold;
-                font-size: 13px;
-                color: #1e293b;
+                font-weight: 700;
+                font-size: 12px;
+                color: #0f172a;
                 background-color: #f8fafc;
             }
             QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #10b981);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4f46e5, stop:1 #10b981);
                 border-radius: 8px;
             }
         """)
@@ -261,7 +316,7 @@ class ScaleTareOverlay(OverlayDialog):
         # Status message
         self.status_label = QLabel("Initializing sensor...")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 14px; color: #475569; font-weight: 600; margin-top: 10px;")
+        self.status_label.setStyleSheet("font-size: 13px; color: #475569; font-weight: 600; margin-top: 4px;")
         self.content_layout.addWidget(self.status_label)
 
         # Connect scale worker signals

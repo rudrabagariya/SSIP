@@ -497,6 +497,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
     def start_visual_verification(self):
         """Initiate strict multi-frame visual verification (10s window, 3 positive matches required)."""
         self.match_count = 0
+        self.wrong_item_counts = {}
         self.required_matches = 3
         self.total_duration_secs = 10.0
         self.start_time = time.time()
@@ -605,6 +606,51 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #15803d; font-weight: 600;")
         else:
+            # Check for incorrect items accumulating matches
+            for item in detected_items:
+                if item != self.expected_yolo_class:
+                    if not hasattr(self, 'wrong_item_counts'):
+                        self.wrong_item_counts = {}
+                    self.wrong_item_counts[item] = self.wrong_item_counts.get(item, 0) + 1
+                    
+                    if self.wrong_item_counts[item] >= self.required_matches:
+                        # Fail immediately!
+                        if hasattr(self, 'visual_timer') and self.visual_timer:
+                            self.visual_timer.stop()
+                        self._disconnect_camera()
+                        self.weight_verified = False # Reset so customer can reposition item
+                        
+                        msg = f"❌ Wrong item detected: '{item}'. Please place '{self.expected_yolo_class}'."
+                        self.live_status_label.setText(msg)
+                        
+                        # Load image
+                        try:
+                            import csv
+                            import os
+                            from PySide6.QtGui import QPixmap
+                            barcode = None
+                            with open(os.path.join(os.path.dirname(__file__), "products.csv"), 'r', encoding='utf-8') as f:
+                                reader = csv.DictReader(f)
+                                for row in reader:
+                                    if row['name'] == item:
+                                        barcode = row['barcode']
+                                        break
+                            if barcode:
+                                img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.png")
+                                if not os.path.exists(img_path):
+                                    img_path = os.path.join(os.path.dirname(__file__), "images", f"{barcode}.jpg")
+                                if os.path.exists(img_path):
+                                    pix = QPixmap(img_path).scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                    self.wrong_image_label.setPixmap(pix)
+                                    self.wrong_image_label.setVisible(True)
+                        except Exception as e:
+                            print("Error loading wrong item image:", e)
+                        
+                        self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
+                        self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
+                        self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
+                        return
+
             saw = f" (seeing {', '.join(detected_items)})" if detected_items else ""
             self.live_status_label.setText(f"Analyzing camera ({remaining:.0f}s left)... Matched {self.match_count}/{self.required_matches}{saw}")
             self.reading_box.setStyleSheet("background-color: #eff6ff; border: 2px solid #93c5fd; border-radius: 12px;")

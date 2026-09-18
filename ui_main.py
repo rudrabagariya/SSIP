@@ -190,6 +190,7 @@ class SmartKiosk(QMainWindow):
         self._unscanned_overlay_active = False
         self._item_removed_overlay_active = False
         self.unscanned_items_weights = []
+        self.zeroing_in_progress = True
         if SCALE_ENABLED:
             try:
                 self.scale_worker = ScaleWorker(self)
@@ -324,10 +325,13 @@ class SmartKiosk(QMainWindow):
     def start_startup_tare(self):
         """Display tare animation overlay and trigger zero tare on scale worker."""
         if not self.scale_worker:
+            self.zeroing_in_progress = False
             return
+        self.zeroing_in_progress = True
         overlay = ScaleTareOverlay(self, self.scale_worker)
         self.scale_worker.request_tare()
         overlay.exec_()
+        self.zeroing_in_progress = False
 
     def on_scale_weight_updated(self, live_weight, is_stable):
         """Update live trolley weight indicator on the cart screen."""
@@ -344,7 +348,7 @@ class SmartKiosk(QMainWindow):
         If weight increases significantly without active scan verification, warn customer
         to scan the barcode first.
         """
-        if getattr(self, '_clearing_trolley_active', False):
+        if getattr(self, '_clearing_trolley_active', False) or getattr(self, 'zeroing_in_progress', False):
             return
 
         if getattr(self, 'payment_in_progress', False):

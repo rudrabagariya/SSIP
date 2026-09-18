@@ -40,7 +40,7 @@ def main():
         from picamera2 import Picamera2
         print("Initializing Picamera2...")
         cap_picam = Picamera2()
-        config = cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (640, 640)})
+        config = cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (1440, 1080)})
         cap_picam.configure(config)
         cap_picam.start()
         print("Connected using native Picamera2!")
@@ -102,7 +102,7 @@ def main():
             cv2.putText(display_frame, "All done! Check your folders.", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.putText(display_frame, "Press Q to quit.", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
-        cv2.imshow("Video Capture (Target: 640x640)", display_frame)
+        cv2.imshow("Video Capture (1440x1080)", display_frame)
         
         key = cv2.waitKey(1)
         if key == ord('q') or key == ord('Q'):
@@ -111,7 +111,7 @@ def main():
             if state == "IDLE_FRONT":
                 filepath = os.path.join(save_dir, "front.avi")
                 # Use MJPG codec, 15 FPS
-                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (640, 640))
+                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (1440, 1080))
                 state = "RECORDING_FRONT"
                 print("Started recording front view...")
             elif state == "RECORDING_FRONT":
@@ -122,7 +122,7 @@ def main():
                 print("Stopped recording front view.")
             elif state == "IDLE_BACK":
                 filepath = os.path.join(save_dir, "back.avi")
-                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (640, 640))
+                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (1440, 1080))
                 state = "RECORDING_BACK"
                 print("Started recording back view...")
             elif state == "RECORDING_BACK":

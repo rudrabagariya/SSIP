@@ -51,13 +51,13 @@ def main():
             print("Error: Could not open any camera.")
             sys.exit(1)
             
-    print(f"\nSaving images to: {save_dir}")
-    print("--> Press SPACE to take a photo.")
+    print(f"\nSaving videos to: {save_dir}")
+    print("--> You will record two videos: Front View and Back View.")
+    print("--> Press SPACE to start/stop recording.")
     print("--> Press 'q' to quit and return to terminal.")
     
-    # Get starting count based on existing files to prevent overwriting
-    existing_files = os.listdir(save_dir)
-    count = len([f for f in existing_files if f.endswith('.jpg')])
+    state = "IDLE_FRONT"
+    recorder = None
     
     while True:
         # Grab frame
@@ -74,27 +74,67 @@ def main():
             if not ret:
                 continue
                 
-        # Make a copy to draw text on (so we don't save the text into the dataset image)
+        # Make a copy to draw text on (so we don't save the text into the dataset video)
         display_frame = frame.copy()
         
-        # Draw on-screen info
-        cv2.putText(display_frame, f"Product: {current_product}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(display_frame, f"Saved: {count} images", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(display_frame, "SPACE to Capture | Q to Quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        
-        cv2.imshow("Data Capture (Target: 640x640)", display_frame)
+        # State machine logic
+        if state == "IDLE_FRONT":
+            cv2.putText(display_frame, f"Product: {current_product}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(display_frame, "Ready for FRONT view", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(display_frame, "Press SPACE to Start Recording", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        elif state == "RECORDING_FRONT":
+            if recorder:
+                recorder.write(frame)
+            cv2.putText(display_frame, "* RECORDING FRONT VIEW *", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(display_frame, "Rotate product slowly...", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(display_frame, "Press SPACE to Stop", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        elif state == "IDLE_BACK":
+            cv2.putText(display_frame, f"Product: {current_product}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(display_frame, "Ready for BACK view", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(display_frame, "Press SPACE to Start Recording", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        elif state == "RECORDING_BACK":
+            if recorder:
+                recorder.write(frame)
+            cv2.putText(display_frame, "* RECORDING BACK VIEW *", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(display_frame, "Rotate product slowly...", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(display_frame, "Press SPACE to Stop", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        elif state == "DONE":
+            cv2.putText(display_frame, "All done! Check your folders.", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(display_frame, "Press Q to quit.", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            
+        cv2.imshow("Video Capture (Target: 640x640)", display_frame)
         
         key = cv2.waitKey(1)
-        if key == ord(' '):
-            # Save the clean frame (without text)
-            filename = os.path.join(save_dir, f"{current_product}_{count}.jpg")
-            cv2.imwrite(filename, frame)
-            print(f"Saved: {filename}")
-            count += 1
-        elif key == ord('q') or key == ord('Q'):
+        if key == ord('q') or key == ord('Q'):
             break
+        elif key == ord(' '):
+            if state == "IDLE_FRONT":
+                filepath = os.path.join(save_dir, "front.avi")
+                # Use MJPG codec, 15 FPS
+                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (640, 640))
+                state = "RECORDING_FRONT"
+                print("Started recording front view...")
+            elif state == "RECORDING_FRONT":
+                if recorder:
+                    recorder.release()
+                    recorder = None
+                state = "IDLE_BACK"
+                print("Stopped recording front view.")
+            elif state == "IDLE_BACK":
+                filepath = os.path.join(save_dir, "back.avi")
+                recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (640, 640))
+                state = "RECORDING_BACK"
+                print("Started recording back view...")
+            elif state == "RECORDING_BACK":
+                if recorder:
+                    recorder.release()
+                    recorder = None
+                state = "DONE"
+                print("Stopped recording back view.")
             
     # Cleanup
+    if recorder:
+        recorder.release()
     if cap_picam:
         cap_picam.stop()
     if cap_cv2:

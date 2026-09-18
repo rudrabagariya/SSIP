@@ -109,7 +109,7 @@ def main():
             break
         elif key == ord(' '):
             if state == "IDLE_FRONT":
-                filepath = os.path.join(save_dir, "front.avi")
+                filepath = os.path.join(save_dir, f"{current_product}_front.avi")
                 # Use MJPG codec, 15 FPS
                 recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (1440, 1080))
                 state = "RECORDING_FRONT"
@@ -121,7 +121,7 @@ def main():
                 state = "IDLE_BACK"
                 print("Stopped recording front view.")
             elif state == "IDLE_BACK":
-                filepath = os.path.join(save_dir, "back.avi")
+                filepath = os.path.join(save_dir, f"{current_product}_back.avi")
                 recorder = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), 15, (1440, 1080))
                 state = "RECORDING_BACK"
                 print("Started recording back view...")

@@ -474,7 +474,41 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.min_weight = max(1.0, self.expected_weight - tol)
         self.max_weight = self.expected_weight + tol
 
-        self.initial_weight = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
+        # 1. Determine items already present in the cart & expected cart baseline weight
+        self.already_in_cart_yolo = set()
+        self.cart_baseline_weight = 0.0
+        if self.parent_widget and hasattr(self.parent_widget, 'cart'):
+            for it in self.parent_widget.cart:
+                w = sum(it.get("actual_weights", [])) if it.get("actual_weights") else (it["qty"] * it.get("weight_grams", 0.0))
+                self.cart_baseline_weight += w
+                c_info = resolve_product_info(it.get("name"))
+                if c_info and c_info.get("yolo"):
+                    self.already_in_cart_yolo.add(c_info["yolo"])
+
+        # 2. Determine competing YOLO items of related/similar weight
+        # We only consider competing items whose weight is within +/- 5.5g of expected_weight,
+        # and exclude items that are already in the cart (since they are already in the trolley!)
+        self.competing_same_weight_yolo = set()
+        for yolo_cls, p_info in YOLO_PRODUCT_MAP.items():
+            if yolo_cls == self.expected_yolo_class:
+                continue
+            if yolo_cls in self.already_in_cart_yolo:
+                continue
+            if abs(p_info["weight"] - self.expected_weight) <= 4.0:
+                self.competing_same_weight_yolo.add(yolo_cls)
+
+        print(f"[VisualVerify] Scanned: '{self.product_name}' ({self.expected_weight}g, yolo={self.expected_yolo_class})")
+        print(f"[VisualVerify] Items already in cart: {self.already_in_cart_yolo} (cart baseline={self.cart_baseline_weight:.1f}g)")
+        print(f"[VisualVerify] Competing same-weight items to check: {self.competing_same_weight_yolo}")
+
+        # 3. Protect initial baseline from negative/spurious drift:
+        # Must be at least cart_baseline_weight and never negative
+        live_scale = self.scale_worker.get_current_weight() if self.scale_worker else 0.0
+        if live_scale >= (self.cart_baseline_weight - 5.0) and live_scale < (self.cart_baseline_weight + max(12.0, self.expected_weight * 0.7)):
+            self.initial_weight = max(0.0, live_scale)
+        else:
+            self.initial_weight = max(0.0, self.cart_baseline_weight)
+
         self.verified = False
         self.weight_verified = False
         self.visual_verifying = False
@@ -710,10 +744,13 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             return
 
         # If user lifted an item that was already resting on the trolley, adjust baseline
-        if current_weight < (self.initial_weight - 5.0):
-            self.initial_weight = current_weight
+        # but NEVER let baseline drop below cart_baseline_weight or negative!
+        if is_stable and current_weight < (self.initial_weight - 5.0):
+            self.initial_weight = max(self.cart_baseline_weight, max(0.0, current_weight))
 
-        diff = current_weight - self.initial_weight
+        # Safe baseline prevents negative initial_weight corruption from inflating diff
+        safe_base = max(self.cart_baseline_weight, max(0.0, self.initial_weight))
+        diff = max(0.0, current_weight - safe_base)
 
         # 1. Handling locked failed state (wrong item placed)
         if self.visual_failed:
@@ -857,7 +894,7 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 wrong_item = max(self.wrong_item_counts, key=self.wrong_item_counts.get)
             elif self.last_detected_items:
                 for item in self.last_detected_items:
-                    if item != self.expected_yolo_class:
+                    if item in self.competing_same_weight_yolo:
                         wrong_item = item
                         break
                         
@@ -874,14 +911,15 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         elapsed = time.time() - self.start_time
         remaining = max(0.0, self.total_duration_secs - elapsed)
 
-        print(f"[VisualVerify] Frame: detected={detected_items}, expected={self.expected_yolo_class}, matches={self.match_count}/{self.required_matches}")
+        print(f"[VisualVerify] Frame: detected={detected_items}, expected={self.expected_yolo_class}, competing={self.competing_same_weight_yolo}, matches={self.match_count}/{self.required_matches}")
 
-        # 1. Check for incorrect items accumulating matches
+        # 1. Check for competing same-weight items accumulating matches
+        # Strictly ignores items already in cart or items with unrelated weights!
         for item in detected_items:
-            if item != self.expected_yolo_class:
+            if item in self.competing_same_weight_yolo:
                 self.wrong_item_counts[item] = self.wrong_item_counts.get(item, 0) + 1
                 if self.wrong_item_counts[item] >= self.required_matches:
-                    # Immediate failure! (Wrong item confirmed)
+                    # Immediate failure! (Confirmed wrong same-weight item placed)
                     if hasattr(self, 'visual_timer') and self.visual_timer:
                         self.visual_timer.stop()
                     self._disconnect_camera()

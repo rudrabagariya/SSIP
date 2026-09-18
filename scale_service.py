@@ -190,6 +190,11 @@ class ScaleWorker(QThread):
                 else:
                     raw_weight = 0.0
 
+                # Discard extreme electrical noise/glitch spikes
+                if raw_weight < -1000.0 or raw_weight > 50000.0:
+                    time.sleep(0.02)
+                    continue
+
                 # 1. Olav Kallhovd despiker
                 self.outlier_filter.add(raw_weight)
                 despiked = self.outlier_filter.get_smoothed()

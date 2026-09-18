@@ -28,9 +28,9 @@ def main():
         print("Invalid choice. Exiting.")
         sys.exit(1)
         
-    # Create the folder for this specific product
+    # Save everything directly into the dataset_raw folder
     base_dataset_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset_raw"))
-    save_dir = os.path.join(base_dataset_dir, current_product)
+    save_dir = base_dataset_dir
     os.makedirs(save_dir, exist_ok=True)
     
     # Initialize Camera

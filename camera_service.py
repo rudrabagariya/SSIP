@@ -1,3 +1,4 @@
+import os
 import time
 from collections import deque
 import cv2
@@ -40,20 +41,25 @@ class CameraWorker(QThread):
             
             if os.path.exists(ncnn_path):
                 model_path = ncnn_path
-                print(f"Loading optimized NCNN Model from {model_path}...")
+                print(f"[CameraWorker] Loading optimized NCNN Model from {model_path}...")
             elif os.path.exists(onnx_path):
                 model_path = onnx_path
-                print(f"Loading optimized ONNX Model from {model_path}...")
+                print(f"[CameraWorker] Loading optimized ONNX Model from {model_path}...")
             elif os.path.exists(pt_path):
                 model_path = pt_path
-                print(f"Loading standard PyTorch Model from {model_path}...")
+                print(f"[CameraWorker] Loading standard PyTorch Model from {model_path}...")
             else:
-                self.sig_camera_error.emit(f"Model not found in {model_dir}")
+                err_msg = f"Model not found in {model_dir}"
+                print(f"[CameraWorker] Error: {err_msg}")
+                self.sig_camera_error.emit(err_msg)
                 return
 
             self.model = YOLO(model_path, task='detect')
+            print(f"[CameraWorker] YOLO model loaded successfully with classes: {self.model.names}")
         except Exception as e:
-            self.sig_camera_error.emit(f"Failed to load YOLO model: {e}")
+            err_msg = f"Failed to load YOLO model: {e}"
+            print(f"[CameraWorker] Error: {err_msg}")
+            self.sig_camera_error.emit(err_msg)
             return
 
         # Auto-detect camera source: Try Picamera2 first (Native libcamera on Bookworm)
@@ -66,16 +72,21 @@ class CameraWorker(QThread):
             config = self.cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (1440, 1080)})
             self.cap_picam.configure(config)
             self.cap_picam.start()
-        except Exception:
+            print("[CameraWorker] Picamera2 initialized at 1440x1080.")
+        except Exception as e:
+            print(f"[CameraWorker] Picamera2 not available ({e}), falling back to OpenCV VideoCapture...")
             self.cap_picam = None
 
         if self.cap_picam is None:
             self.cap_cv2 = cv2.VideoCapture(0)
             if not self.cap_cv2.isOpened():
-                self.sig_camera_error.emit("Cannot open any camera device. Check libcamera or V4L2 drivers.")
+                err_msg = "Cannot open any camera device. Check libcamera or V4L2 drivers."
+                print(f"[CameraWorker] Error: {err_msg}")
+                self.sig_camera_error.emit(err_msg)
                 return
             self.cap_cv2.set(cv2.CAP_PROP_FRAME_WIDTH, 1440)
             self.cap_cv2.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            print("[CameraWorker] OpenCV VideoCapture opened at 1440x1080.")
 
         history_len = 5
         history_buffer = deque(maxlen=history_len)
@@ -102,15 +113,15 @@ class CameraWorker(QThread):
                 h, w, _ = frame.shape
                 
                 try:
-                    # imgsz=640 for accuracy, conf=0.7 for reducing false positives
-                    results = self.model.predict(source=frame, conf=0.70, imgsz=640, verbose=False)
+                    # imgsz=640 for accuracy, conf=0.45 for reliable detection
+                    results = self.model.predict(source=frame, conf=0.45, imgsz=640, verbose=False)
                     
                     detected_items = []
                     
                     for box in results[0].boxes:
                         cls_id = int(box.cls[0])
                         conf = float(box.conf[0])
-                        name = model.names[cls_id]
+                        name = self.model.names[cls_id]
 
                         coords = box.xyxy[0].cpu().numpy()
                         bx1, by1, bx2, by2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
@@ -119,16 +130,18 @@ class CameraWorker(QThread):
                         box_h = (by2 - by1) / float(h)
                         box_area = box_w * box_h
 
-                        # Sanity filter: Ignore giant boxes (false positives on background)
-                        if box_area > 0.30:
+                        # Allow boxes up to 85% of frame (supports holding packet near camera)
+                        if box_area > 0.85:
                             continue
 
-                        if conf > 0.5:
+                        if conf >= 0.40:
                             detected_items.append(name)
 
+                    print(f"[CameraWorker] Live detection result: {detected_items}")
                     self.sig_detection_result.emit(detected_items)
                         
                 except Exception as e:
+                    print(f"[CameraWorker] Inference error: {e}")
                     self.sig_camera_error.emit(f"Inference error: {e}")
 
             # Sleep slightly to prevent maxing out a CPU core when idling

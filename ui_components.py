@@ -429,6 +429,23 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         self.cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(self.cancel_btn)
 
+        self.skip_btn = QPushButton("Skip Visual Check")
+        self.skip_btn.setMinimumHeight(46)
+        self.skip_btn.setCursor(Qt.PointingHandCursor)
+        self.skip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f8fafc;
+                color: #475569;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #e2e8f0; color: #1e293b; }
+        """)
+        self.skip_btn.clicked.connect(self.on_skip)
+        btn_layout.addWidget(self.skip_btn)
+
         self.content_layout.addLayout(btn_layout)
 
         # Connect live scale signal
@@ -460,12 +477,10 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.measured_weight = round(diff, 1)
                 
                 if self.camera_worker and self.expected_yolo_class:
-                    self.live_status_label.setText("Weight matched! Analyzing visually...")
+                    self.live_status_label.setText(f"Weight matched! Looking for {self.expected_yolo_class}...")
                     self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
                     self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #15803d;")
-                    
-                    self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
-                    self.camera_worker.request_analysis()
+                    self.start_visual_verification()
                 else:
                     self.verified = True
                     self.live_diff_label.setText(f"✅ Verified: +{diff:.1f} g")
@@ -486,46 +501,103 @@ class ItemWeightVerificationOverlay(OverlayDialog):
                 self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
                 self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
+    def start_visual_verification(self):
+        """Initiate continuous multi-frame visual verification."""
+        self.visual_attempts = 0
+        self.max_visual_attempts = 15  # 15 frames (~5 seconds of active checking)
+        
+        try:
+            self.camera_worker.sig_detection_result.connect(self.on_camera_detection)
+            self.camera_worker.sig_camera_error.connect(self.on_camera_error)
+        except Exception:
+            pass
+
+        self.visual_timer = QTimer(self)
+        self.visual_timer.timeout.connect(self._poll_camera)
+        self.visual_timer.start(350)
+        self._poll_camera()
+
+    def _poll_camera(self):
+        if self.verified or not self.camera_worker:
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
+            return
+            
+        self.visual_attempts += 1
+        self.camera_worker.request_analysis()
+
     def on_camera_detection(self, detected_items):
         if self.verified:
             return
-            
-        try:
-            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
-        except Exception:
-            pass
-            
+
+        print(f"[VisualVerify] Frame check ({self.visual_attempts}/{self.max_visual_attempts}): detected={detected_items}, expected={self.expected_yolo_class}")
+
         if self.expected_yolo_class in detected_items:
             self.verified = True
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
+            self._disconnect_camera()
             self.live_diff_label.setText(f"✅ Verified: +{self.measured_weight:.1f} g")
             self.live_status_label.setText("Visual & Weight matched! Adding to cart...")
             self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+            self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
             QTimer.singleShot(800, self.accept)
+            return
+
+        # Keep checking frames if within limit
+        if self.visual_attempts < self.max_visual_attempts:
+            saw = f" (seeing {', '.join(detected_items)})" if detected_items else ""
+            self.live_status_label.setText(f"Analyzing camera... ({self.visual_attempts}/{self.max_visual_attempts}){saw}")
         else:
-            # Mismatch or unknown
-            self.weight_verified = False # Reset so they can try again
-            detected_str = ", ".join(detected_items) if detected_items else "nothing"
+            # Reached max attempts without matching
+            if hasattr(self, 'visual_timer') and self.visual_timer:
+                self.visual_timer.stop()
+            self._disconnect_camera()
+            self.weight_verified = False # allow retry
+            detected_str = ", ".join(detected_items) if detected_items else "nothing detected"
             self.live_status_label.setText(f"⚠️ Visual mismatch! Expected {self.expected_yolo_class}, saw {detected_str}")
             self.reading_box.setStyleSheet("background-color: #fef2f2; border: 2px solid #f87171; border-radius: 12px;")
             self.live_diff_label.setStyleSheet("font-size: 20px; font-weight: 800; color: #b91c1c;")
             self.live_status_label.setStyleSheet("font-size: 13px; color: #dc2626; font-weight: 600;")
 
-    def reject(self):
+    def on_camera_error(self, err_msg):
+        print(f"[VisualVerify] Camera error reported: {err_msg}")
+        self._disconnect_camera()
+        if hasattr(self, 'visual_timer') and self.visual_timer:
+            self.visual_timer.stop()
+        # Fallback to weight verification so customer is not blocked by camera hardware issues
+        self.verified = True
+        self.live_diff_label.setText(f"✅ Verified (Weight): +{self.measured_weight:.1f} g")
+        self.live_status_label.setText("Weight verified (Camera offline). Adding to cart...")
+        self.live_status_label.setStyleSheet("font-size: 13px; color: #16a34a; font-weight: 600;")
+        self.reading_box.setStyleSheet("background-color: #f0fdf4; border: 2px solid #4ade80; border-radius: 12px;")
+        QTimer.singleShot(900, self.accept)
+
+    def _disconnect_camera(self):
         try:
-            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+            if self.camera_worker:
+                self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
+                self.camera_worker.sig_camera_error.disconnect(self.on_camera_error)
         except Exception:
             pass
+
+    def reject(self):
+        if hasattr(self, 'visual_timer') and self.visual_timer:
+            self.visual_timer.stop()
+        self._disconnect_camera()
         super().reject()
 
     def accept(self):
-        try:
-            self.camera_worker.sig_detection_result.disconnect(self.on_camera_detection)
-        except Exception:
-            pass
+        if hasattr(self, 'visual_timer') and self.visual_timer:
+            self.visual_timer.stop()
+        self._disconnect_camera()
         super().accept()
 
     def on_skip(self):
         # Allow staff or customer override
+        if hasattr(self, 'visual_timer') and self.visual_timer:
+            self.visual_timer.stop()
+        self._disconnect_camera()
         self.measured_weight = self.expected_weight
         self.accept()
 

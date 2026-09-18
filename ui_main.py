@@ -204,6 +204,7 @@ class SmartKiosk(QMainWindow):
 
         try:
             self.camera_worker = CameraWorker()
+            self.camera_worker.sig_camera_error.connect(lambda err: print(f"[UI] CameraWorker Alert: {err}"))
             self.camera_worker.start()
         except Exception as e:
             print(f"[UI] Warning: Could not initialize CameraWorker: {e}")

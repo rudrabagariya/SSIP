@@ -63,7 +63,7 @@ class CameraWorker(QThread):
         try:
             from picamera2 import Picamera2
             self.cap_picam = Picamera2()
-            config = self.cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (640, 480)})
+            config = self.cap_picam.create_video_configuration(main={"format": "XRGB8888", "size": (1440, 1080)})
             self.cap_picam.configure(config)
             self.cap_picam.start()
         except Exception:
@@ -74,6 +74,8 @@ class CameraWorker(QThread):
             if not self.cap_cv2.isOpened():
                 self.sig_camera_error.emit("Cannot open any camera device. Check libcamera or V4L2 drivers.")
                 return
+            self.cap_cv2.set(cv2.CAP_PROP_FRAME_WIDTH, 1440)
+            self.cap_cv2.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
         history_len = 5
         history_buffer = deque(maxlen=history_len)

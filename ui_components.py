@@ -951,6 +951,29 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             saw = f" (seeing {', '.join(detected_items)})" if detected_items else ""
             self.live_status_label.setText(f"Analyzing camera ({remaining:.1f}s left)... Matched {self.match_count}/{self.required_matches}{saw}")
 
+    def _get_camera_pixmap(self, size=(94, 94)):
+        if not hasattr(self, 'camera_worker') or not self.camera_worker or not hasattr(self.camera_worker, 'last_frame'):
+            return None
+        frame = self.camera_worker.last_frame
+        if frame is None:
+            return None
+        try:
+            import cv2
+            from PySide6.QtGui import QImage, QPixmap
+            from PySide6.QtCore import Qt
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+            q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            min_dim = min(w, h)
+            start_x = (w - min_dim) // 2
+            start_y = (h - min_dim) // 2
+            cropped = q_img.copy(start_x, start_y, min_dim, min_dim)
+            return QPixmap.fromImage(cropped).scaled(size[0], size[1], Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        except Exception as e:
+            print(f"[VisualVerify] Error getting camera pixmap: {e}")
+            return None
+
     def show_visual_failure(self, wrong_item_yolo=None):
         """Displays side-by-side discrimination UI and locks until item is removed."""
         self.visual_failed = True
@@ -969,6 +992,8 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         exp_pix = load_product_pixmap(exp_barcode, size=(94, 94))
         if exp_pix:
             self.expected_img_label.setPixmap(exp_pix)
+            self.expected_img_label.setText("")
+            self.expected_img_label.setStyleSheet("background: #ffffff; border: 1px solid #86efac; border-radius: 8px;")
         else:
             self.expected_img_label.setText("📦")
             self.expected_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #86efac; border-radius: 8px;")
@@ -981,8 +1006,14 @@ class ItemWeightVerificationOverlay(OverlayDialog):
             self.wrong_name_label.setText(wrong_name)
             self.wrong_sub_label.setText("Detected by camera")
             wrong_pix = load_product_pixmap(wrong_barcode, size=(94, 94))
+            
+            if not wrong_pix:
+                wrong_pix = self._get_camera_pixmap()
+                
             if wrong_pix:
                 self.wrong_img_label.setPixmap(wrong_pix)
+                self.wrong_img_label.setText("")
+                self.wrong_img_label.setStyleSheet("background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
             else:
                 self.wrong_img_label.setText("📦")
                 self.wrong_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
@@ -992,8 +1023,16 @@ class ItemWeightVerificationOverlay(OverlayDialog):
         else:
             self.wrong_name_label.setText("Unidentified Item")
             self.wrong_sub_label.setText("Not recognized by camera")
-            self.wrong_img_label.setText("📷")
-            self.wrong_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+            
+            cam_pix = self._get_camera_pixmap()
+            if cam_pix:
+                self.wrong_img_label.setPixmap(cam_pix)
+                self.wrong_img_label.setText("")
+                self.wrong_img_label.setStyleSheet("background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+            else:
+                self.wrong_img_label.setText("📷")
+                self.wrong_img_label.setStyleSheet("font-size: 32px; background: #ffffff; border: 1px solid #fca5a5; border-radius: 8px;")
+                
             self.live_status_label.setText(f"❌ Camera could not verify '{exp_name}'. Please place item facing camera.")
             self.error_action_text.setText(f"👉 Please remove item, face label toward camera, and place again")
 

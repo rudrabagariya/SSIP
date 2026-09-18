@@ -108,6 +108,8 @@ class CameraWorker(QThread):
                     time.sleep(0.1)
                     continue
 
+            self.last_frame = frame.copy()
+
             if self._analyze_requested:
                 self._analyze_requested = False
                 h, w, _ = frame.shape

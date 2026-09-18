@@ -2368,6 +2368,10 @@ class SmartKiosk(QMainWindow):
             self.show_message("Action Blocked", "You cannot modify the cart during checkout.", "warning")
             return
             
+        if getattr(self, 'verification_in_progress', False):
+            # Ignore subsequent scans while verifying an item
+            return
+
         if getattr(self, '_unscanned_overlay_active', False):
             self.show_message("Action Blocked", "Please remove the unscanned item first.", "warning")
             return

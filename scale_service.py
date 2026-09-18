@@ -120,7 +120,7 @@ class ScaleWorker(QThread):
         self.hx = None
         self.outlier_filter = KallhovdRollingFilter(size=8)
         self.kalman_filter = SimpleKalmanFilter(mea_e=3.0, est_e=3.0, q=0.05)
-        self.recent_estimates = deque(maxlen=6)
+        self.recent_estimates = deque(maxlen=15)
 
     def request_tare(self, samples=None):
         """Request a zero tare to be executed by the background thread."""
